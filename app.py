@@ -17,7 +17,7 @@ import streamlit as st
 st.set_page_config(page_title="Notion MD → ChatGPT", page_icon="🧩", layout="wide")
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Helpers: run_id, normalize, slug, Notion fájlnév-ID
+# Helpers: run_id, normalize, slug, Notion fájlnév-ID, safe filename
 # ────────────────────────────────────────────────────────────────────────────────
 def run_id() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -38,6 +38,24 @@ def slugify(s: str, maxlen: int = 100) -> str:
     s = s.replace(" ", "_")
     s = re.sub(r"[^a-z0-9_]+", "", s)
     return s[:maxlen] if len(s) > maxlen else s
+
+def safe_filename(title: str, page_id: Optional[str] = None, maxlen: int = 140) -> str:
+    """
+    Ékezeteket meghagyjuk; csak tiltott fájlneveket cserélünk.
+    """
+    base = title.strip() if title else "untitled"
+    # Windows tiltott karakterek
+    base = re.sub(r'[\\/:*?"<>|]+', "_", base)
+    # Kontroll/whitespace normalizálás
+    base = re.sub(r"\s+", " ", base).strip()
+    if page_id:
+        base = f"{base} {page_id}"
+    # hossz limit
+    if len(base) > maxlen:
+        base = base[:maxlen].rstrip()
+    if not base:
+        base = page_id or "untitled"
+    return base + ".md"
 
 def extract_page_id_from_filename(name: str) -> Optional[str]:
     """
@@ -266,12 +284,27 @@ def chunk_markdown(md: str, target_chars: int = 5500, overlap_chars: int = 400) 
     return chunks
 
 # ────────────────────────────────────────────────────────────────────────────────
-# ZIP feldolgozás (UTF-8 + BOM támogatás)
+# ZIP fájlnév-dekódolás + tartalom (UTF-8 + BOM támogatás)
 # ────────────────────────────────────────────────────────────────────────────────
+def _fixed_zip_filename(info: zipfile.ZipInfo) -> str:
+    """
+    Ha nincs UTF-8 flag a ZIP fejlécben, a python zipfile cp437-t feltételez.
+    Ilyenkor a 'Ajánlott' → 'Aja╠ünlott' jellegű mojibake jön.
+    Megoldás: a már cp437-ként dekódolt unicode-ot vissza-bytoljuk cp437-re, majd utf-8-ként dekódoljuk.
+    """
+    name = info.filename
+    try:
+        # bit 11 (0x800) jelzi az UTF-8 flag-et
+        if not (info.flag_bits & 0x800):
+            return name.encode("cp437").decode("utf-8")
+    except Exception:
+        pass
+    return name
+
 def iter_markdown_files(zf: zipfile.ZipFile) -> List[Tuple[str, str]]:
     """
     Bejárja a ZIP-et, és visszaadja a (arcname, text) listát .md fájlokra.
-    Dekódolás: 'utf-8-sig' → eltávolítja a BOM-ot, ha jelen van.
+    Fájlnév dekódolás fixálva, tartalom dekódolás: 'utf-8-sig' (BOM eltávolítva).
     """
     md_items: List[Tuple[str, str]] = []
     for info in zf.infolist():
@@ -279,6 +312,7 @@ def iter_markdown_files(zf: zipfile.ZipFile) -> List[Tuple[str, str]]:
             continue
         if not info.filename.lower().endswith(".md"):
             continue
+        fixed_name = _fixed_zip_filename(info)
         with zf.open(info, "r") as f:
             b = f.read()
         try:
@@ -286,7 +320,7 @@ def iter_markdown_files(zf: zipfile.ZipFile) -> List[Tuple[str, str]]:
             s = b.decode("utf-8-sig")
         except UnicodeDecodeError:
             s = b.decode("utf-8", errors="replace")
-        md_items.append((info.filename, s))
+        md_items.append((fixed_name, s))
     return md_items
 
 def extract_page_title(md: str, fallback: str) -> str:
@@ -298,7 +332,7 @@ def extract_page_title(md: str, fallback: str) -> str:
     return fallback
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Konverzió (fő logika) – BOM-os CSV, BOM nélküli JSONL
+# Konverzió (fő logika) – JSONL + CSV + Report + Clean MD (ZIP)
 # ────────────────────────────────────────────────────────────────────────────────
 def convert_zip_to_datasets(
     zip_bytes: bytes,
@@ -307,9 +341,9 @@ def convert_zip_to_datasets(
     chunk: bool,
     target_chars: int,
     overlap_chars: int
-) -> Tuple[bytes, bytes, bytes]:
+) -> Tuple[bytes, bytes, bytes, bytes]:
     """
-    Visszaad: (jsonl_bytes, csv_bytes_with_bom, report_csv_bytes_with_bom)
+    Visszaad: (jsonl_bytes, csv_bytes_with_bom, report_csv_bytes_with_bom, clean_md_zip_bytes)
     """
     rid = run_id()
     zf = zipfile.ZipFile(io.BytesIO(zip_bytes), "r")
@@ -325,6 +359,10 @@ def convert_zip_to_datasets(
 
     csv_w.writerow(["file_name", "page_id", "page_title", "selected_section", "selected_heading", "char_len", "tartalom"])
     rep_w.writerow(["file_name", "page_id", "page_title", "video_len", "lesson_len", "selected", "selected_len"])
+
+    # Tisztított MD-k külön ZIP-be
+    md_zip_buf = io.BytesIO()
+    md_zip = zipfile.ZipFile(md_zip_buf, "w", compression=zipfile.ZIP_DEFLATED)
 
     total = len(md_files)
     ok = 0
@@ -404,9 +442,25 @@ def convert_zip_to_datasets(
             len(cleaned)
         ])
 
+        # Tisztított MD fájl létrehozása és betétele a ZIP-be
+        md_name = safe_filename(title, page_id=page_id)
+        md_lines = []
+        if title:
+            md_lines.append(f"# {title}")
+        if selected_heading:
+            md_lines.append(f"## {selected_heading}")
+        if cleaned.strip():
+            md_lines.append(cleaned.strip())
+        md_content = "\n\n".join(md_lines).strip() + "\n"
+        md_zip.writestr(f"{md_name}", md_content.encode("utf-8"))
+
         ok += 1
         pct = ok / max(1, total)
         progress.progress(pct, text=f"{ok}/{total} feldolgozva")
+
+    # Zárjuk az MD ZIP-et
+    md_zip.close()
+    clean_md_zip_bytes = md_zip_buf.getvalue()
 
     # ── Kimenetek: CSV-k BOM-mal, JSONL BOM nélkül
     jsonl_bytes = jsonl_buf.getvalue().encode("utf-8")
@@ -418,19 +472,19 @@ def convert_zip_to_datasets(
     csv_bytes = ("\ufeff" + csv_text).encode("utf-8")
     rep_bytes = ("\ufeff" + rep_text).encode("utf-8")
 
-    return jsonl_bytes, csv_bytes, rep_bytes
+    return jsonl_bytes, csv_bytes, rep_bytes, clean_md_zip_bytes
 
 # ────────────────────────────────────────────────────────────────────────────────
 # UI
 # ────────────────────────────────────────────────────────────────────────────────
-st.title("🧩 Notion Markdown → ChatGPT (JSONL/CSV) konverter")
-st.caption("Duplikációk kizárása: videó szövege → ha üres, lecke szövege → más szekciók kihagyása.")
+st.title("🧩 Notion Markdown → ChatGPT (JSONL/CSV/MD) konverter")
+st.caption("Duplikációk kizárása: videó szövege → ha üres, lecke szövege → más szekciók kihagyása. UTF-8/ékezet támogatás, CSV BOM-mal.")
 
 with st.expander("Mi ez?"):
     st.markdown(
         "- Tölts fel egy **Notion export ZIP**-et (Markdown & CSV exportból a ZIP-et használd).\n"
         "- A konverter a **„Videó szövege”** (vagy rokon címke) tartalmat vágja ki; ha üres, akkor a **„Lecke szövege”**-t.\n"
-        "- Kimenet: **JSONL** (Custom GPT / RAG), **CSV**, és egy **ellenőrző riport**.\n"
+        "- Kimenet: **JSONL** (Custom GPT / RAG), **CSV**, **tisztított Markdownok (ZIP)** és egy **ellenőrző riport**.\n"
         "- Opcionális: **chunkolás** átfedéssel (JSONL-hoz)."
     )
 
@@ -460,23 +514,29 @@ if uploaded is not None:
         llabels = [x.strip() for x in lesson_labels_str.splitlines() if x.strip()]
 
         t0 = time.time()
-        jsonl_bytes, csv_bytes, rep_bytes = convert_zip_to_datasets(
+        jsonl_bytes, csv_bytes, rep_bytes, md_zip_bytes = convert_zip_to_datasets(
             uploaded.read(), vlabels, llabels, chunk, int(target_chars), int(overlap_chars)
         )
 
         rid = run_id()
 
-        # ZIP csomag az outputokról: a BOM-os CSV-k kerülnek bele
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # Minden egyben (ZIP): JSONL + CSV-k + CLEAN MD-k
+        all_buf = io.BytesIO()
+        with zipfile.ZipFile(all_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             zf.writestr("output.jsonl", jsonl_bytes)
             zf.writestr("output.csv", csv_bytes)     # BOM-os
             zf.writestr("report.csv", rep_bytes)     # BOM-os
-        buf.seek(0)
-        elapsed = int(time.time() - t0)
+            # A tisztított MD ZIP tartalmát al-mappaként bepakoljuk
+            with zipfile.ZipFile(io.BytesIO(md_zip_bytes), "r") as mdzf:
+                for info in mdzf.infolist():
+                    data = mdzf.read(info.filename)
+                    zf.writestr(f"clean_md/{info.filename}", data)
+        all_buf.seek(0)
 
+        elapsed = int(time.time() - t0)
         st.success(f"Kész! ({elapsed} mp)")
-        col1, col2 = st.columns(2)
+
+        col1, col2, col3 = st.columns(3)
         with col1:
             st.download_button(
                 "⬇️ Letöltés – JSONL",
@@ -492,8 +552,21 @@ if uploaded is not None:
             )
         with col2:
             st.download_button(
+                "⬇️ Letöltés – Riport CSV",
+                data=rep_bytes,
+                file_name=f"report_{rid}.csv",
+                mime="text/csv; charset=utf-8"
+            )
+            st.download_button(
+                "⬇️ Letöltés – Tisztított MD-k (ZIP)",
+                data=md_zip_bytes,
+                file_name=f"clean_md_{rid}.zip",
+                mime="application/zip"
+            )
+        with col3:
+            st.download_button(
                 "⬇️ Letöltés – Minden egyben (ZIP)",
-                data=buf.getvalue(),
+                data=all_buf.getvalue(),
                 file_name=f"converted_{rid}.zip",
                 mime="application/zip"
             )
