@@ -442,7 +442,6 @@ def extract_page_title(md: str, fallback: str) -> str:
 # ────────────────────────────────────────────────────────────────────────────────
 # Metaadat-parzolás (fejléc utáni kulcs: érték sorok)
 # ────────────────────────────────────────────────────────────────────────────────
-# Kulcs aliasok → kanonikus meta_kulcs
 _META_ALIASES = {
     "szakasz": ["szakasz", "section", "fejezet", "modul"],
     "video_statusz": ["videó státusz", "video statusz", "videostatusz", "videó status", "videostatus"],
@@ -701,7 +700,7 @@ def convert_zip_to_datasets(
 # UI
 # ────────────────────────────────────────────────────────────────────────────────
 st.title("🧩 Notion Markdown → ChatGPT (JSONL/CSV/MD) konverter")
-st.caption("Duplikációk kizárása (Videó→Lecke), félkövér tisztítás, táblázatok gépi kivonata. Metaadatok kinyerése és Sorszám-előtag az MD fájlnevekben. UTF-8, CSV BOM.")
+st.caption("Duplikációk kizárása (Videó→Lecke), félkövér tisztítás, táblázatok gépi kivonata. Metaadatok és Sorszám-előtag az MD fájlnevekben. UTF-8, CSV BOM.")
 
 with st.expander("Mi ez?"):
     st.markdown(
@@ -709,9 +708,9 @@ with st.expander("Mi ez?"):
         "- A konverter a **„Videó szövege”** (vagy rokon címke) tartalmat vágja ki; ha üres, akkor a **„Lecke szövege”**-t.\n"
         "- A félkövér (**…**) jelölést eltávolítja (kódblokkok érintetlenek).\n"
         "- A táblázatokat (GFM) felismeri és **JSON kivonatot** készít róluk.\n"
-        "- **Metaadatokat** is kinyer: *Szakasz, Videó státusz, Lecke hossza, Utolsó módosítás, Típus, Kurzus, Vimeo link, Sorszám*.\n"
+        "- **Metaadatokat** is kinyer (Szakasz, Videó státusz, Lecke hossza, Utolsó módosítás, Típus, Kurzus, Vimeo link, Sorszám).\n"
         "- A tisztított MD fájl **fájlnévének elejére** kerül a **Sorszám** (pl. `20-Cím.md`).\n"
-        "- Kimenet: **JSONL** (szöveg), **CSV**, **riport CSV**, **tisztított MD-k (ZIP)**, **táblázatok (JSONL)**.\n"
+        "- Kimenet: **tisztított MD-k (ajánlott)** + haladó formátumok: JSONL, CSV, riport CSV, táblázatok JSONL.\n"
         "- Opcionális: **chunkolás** átfedéssel (JSONL-hoz)."
     )
 
@@ -747,61 +746,74 @@ if uploaded is not None:
         )
 
         rid = run_id()
-
-        # Minden egyben (ZIP): JSONL + CSV-k + CLEAN MD-k + táblázatok JSONL
-        all_buf = io.BytesIO()
-        with zipfile.ZipFile(all_buf, "w", compression=zipfile.Zip_DEFLATED) as zf:
-            zf.writestr("output.jsonl", jsonl_bytes)
-            zf.writestr("output.csv", csv_bytes)         # BOM-os
-            zf.writestr("report.csv", rep_bytes)         # BOM-os
-            zf.writestr("tables.jsonl", tables_jsonl_bytes)
-            # a tisztított MD ZIP tartalmát al-mappaként bepakoljuk
-            with zipfile.ZipFile(io.BytesIO(md_zip_bytes), "r") as mdzf:
-                for info in mdzf.infolist():
-                    data = mdzf.read(info.filename)
-                    zf.writestr(f"clean_md/{info.filename}", data)
-        all_buf.seek(0)
-
         elapsed = int(time.time() - t0)
         st.success(f"Kész! ({elapsed} mp)")
 
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.download_button(
-                "⬇️ Letöltés – JSONL (szöveg)",
-                data=jsonl_bytes,
-                file_name=f"output_{rid}.jsonl",
-                mime="application/json"
-            )
-            st.download_button(
-                "⬇️ Letöltés – CSV",
-                data=csv_bytes,
-                file_name=f"output_{rid}.csv",
-                mime="text/csv; charset=utf-8"
-            )
-        with col2:
-            st.download_button(
-                "⬇️ Letöltés – Riport CSV",
-                data=rep_bytes,
-                file_name=f"report_{rid}.csv",
-                mime="text/csv; charset=utf-8"
-            )
-            st.download_button(
-                "⬇️ Letöltés – Táblázatok (JSONL)",
-                data=tables_jsonl_bytes,
-                file_name=f"tables_{rid}.jsonl",
-                mime="application/json"
-            )
-        with col3:
-            st.download_button(
-                "⬇️ Letöltés – Tisztított MD-k (ZIP)",
-                data=md_zip_bytes,
-                file_name=f"clean_md_{rid}.zip",
-                mime="application/zip"
-            )
-            st.download_button(
-                "⬇️ Letöltés – Minden egyben (ZIP)",
-                data=all_buf.getvalue(),
-                file_name=f"converted_{rid}.zip",
-                mime="application/zip"
-            )
+        # ── Elsődleges letöltés: Tisztított MD-k (AJÁNLOTT) ─────────────────────
+        st.markdown("### ⭐ Ajánlott letöltés")
+        st.caption("Ezt használd elsősorban: tisztított, Sorszám-előtaggal ellátott Markdown fájlok.")
+        st.download_button(
+            "⬇️ Tisztított MD-k (ZIP) – AJÁNLOTT",
+            data=md_zip_bytes,
+            file_name=f"clean_md_{rid}.zip",
+            mime="application/zip",
+            use_container_width=True
+        )
+
+        st.divider()
+
+        # ── Másodlagos / haladó formátumok: expanderben ─────────────────────────
+        with st.expander("Haladó letöltések (JSONL/CSV/riport/táblázatok/Minden egyben)", expanded=False):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.download_button(
+                    "⬇️ JSONL (szöveg, RAG/finetune)",
+                    data=jsonl_bytes,
+                    file_name=f"output_{rid}.jsonl",
+                    mime="application/json",
+                    use_container_width=True
+                )
+                st.download_button(
+                    "⬇️ Riport CSV",
+                    data=rep_bytes,
+                    file_name=f"report_{rid}.csv",
+                    mime="text/csv; charset=utf-8",
+                    use_container_width=True
+                )
+            with c2:
+                st.download_button(
+                    "⬇️ CSV (szöveg + meta)",
+                    data=csv_bytes,
+                    file_name=f"output_{rid}.csv",
+                    mime="text/csv; charset=utf-8",
+                    use_container_width=True
+                )
+                st.download_button(
+                    "⬇️ Táblázatok (JSONL)",
+                    data=tables_jsonl_bytes,
+                    file_name=f"tables_{rid}.jsonl",
+                    mime="application/json",
+                    use_container_width=True
+                )
+            with c3:
+                # Minden egyben ZIP
+                all_buf = io.BytesIO()
+                with zipfile.ZipFile(all_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    zf.writestr("output.jsonl", jsonl_bytes)
+                    zf.writestr("output.csv", csv_bytes)         # BOM-os
+                    zf.writestr("report.csv", rep_bytes)         # BOM-os
+                    zf.writestr("tables.jsonl", tables_jsonl_bytes)
+                    # a tisztított MD ZIP tartalmát al-mappaként bepakoljuk
+                    with zipfile.ZipFile(io.BytesIO(md_zip_bytes), "r") as mdzf:
+                        for info in mdzf.infolist():
+                            data = mdzf.read(info.filename)
+                            zf.writestr(f"clean_md/{info.filename}", data)
+                all_buf.seek(0)
+
+                st.download_button(
+                    "⬇️ Minden egyben (ZIP)",
+                    data=all_buf.getvalue(),
+                    file_name=f"converted_{rid}.zip",
+                    mime="application/zip",
+                    use_container_width=True
+                )
