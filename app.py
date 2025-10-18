@@ -641,12 +641,35 @@ def convert_zip_to_datasets(
             len(md_with_tables)
         ])
 
-        # Tisztított MD fájl (emberbarát + végén gépi kivonat), Sorszám-előtaggal
+        # ── Tisztított MD készítése meta blokkal a H1 után ──────────────────────
         md_name = build_md_filename(title, sorsz_int, page_id)
+
+        # Meta címkék megjelenítési sorrendben
+        meta_labels = [
+            ("Szakasz", "szakasz"),
+            ("Videó státusz", "video_statusz"),
+            ("Lecke hossza", "lecke_hossza"),
+            ("Utolsó módosítás", "utolso_modositas"),
+            ("Típus", "tipus"),
+            ("Kurzus", "kurzus"),
+            ("Vimeo link", "vimeo_link"),
+        ]
+        meta_lines = []
+        for label, key in meta_labels:
+            val = (meta.get(key) or "").strip()
+            if val:
+                meta_lines.append(f"{label}: {val}")
+
         md_lines = []
-        if title: md_lines.append(f"# {title}")
-        if selected_heading: md_lines.append(f"## {selected_heading}")
-        if md_with_tables.strip(): md_lines.append(md_with_tables.strip())
+        if title:
+            md_lines.append(f"# {title}")
+        if meta_lines:
+            md_lines.append("\n".join(meta_lines))  # meta blokk
+        if selected_heading:
+            md_lines.append(f"## {selected_heading}")
+        if md_with_tables.strip():
+            md_lines.append(md_with_tables.strip())
+
         md_content = "\n\n".join(md_lines).strip() + "\n"
         md_zip.writestr(f"{md_name}", md_content.encode("utf-8"))
 
@@ -700,7 +723,7 @@ def convert_zip_to_datasets(
 # UI
 # ────────────────────────────────────────────────────────────────────────────────
 st.title("🧩 Notion Markdown → ChatGPT (JSONL/CSV/MD) konverter")
-st.caption("Duplikációk kizárása (Videó→Lecke), félkövér tisztítás, táblázatok gépi kivonata. Metaadatok és Sorszám-előtag az MD fájlnevekben. UTF-8, CSV BOM.")
+st.caption("Duplikációk kizárása (Videó→Lecke), félkövér tisztítás, táblázatok gépi kivonata. Metaadatok megőrzése a tisztított MD-ben és Sorszám-előtag a fájlnevekben. UTF-8, CSV BOM.")
 
 with st.expander("Mi ez?"):
     st.markdown(
@@ -708,7 +731,7 @@ with st.expander("Mi ez?"):
         "- A konverter a **„Videó szövege”** (vagy rokon címke) tartalmat vágja ki; ha üres, akkor a **„Lecke szövege”**-t.\n"
         "- A félkövér (**…**) jelölést eltávolítja (kódblokkok érintetlenek).\n"
         "- A táblázatokat (GFM) felismeri és **JSON kivonatot** készít róluk.\n"
-        "- **Metaadatokat** is kinyer (Szakasz, Videó státusz, Lecke hossza, Utolsó módosítás, Típus, Kurzus, Vimeo link, Sorszám).\n"
+        "- **Metaadatok megőrzése**: a *Szakasz, Videó státusz, Lecke hossza, Utolsó módosítás, Típus, Kurzus, Vimeo link* sorok a H1 után bekerülnek a tisztított MD-be.\n"
         "- A tisztított MD fájl **fájlnévének elejére** kerül a **Sorszám** (pl. `20-Cím.md`).\n"
         "- Kimenet: **tisztított MD-k (ajánlott)** + haladó formátumok: JSONL, CSV, riport CSV, táblázatok JSONL.\n"
         "- Opcionális: **chunkolás** átfedéssel (JSONL-hoz)."
@@ -751,7 +774,7 @@ if uploaded is not None:
 
         # ── Elsődleges letöltés: Tisztított MD-k (AJÁNLOTT) ─────────────────────
         st.markdown("### ⭐ Ajánlott letöltés")
-        st.caption("Ezt használd elsősorban: tisztított, Sorszám-előtaggal ellátott Markdown fájlok.")
+        st.caption("Ezt használd elsősorban: tisztított, meta-blokkal és Sorszám-előtaggal ellátott Markdown fájlok.")
         st.download_button(
             "⬇️ Tisztított MD-k (ZIP) – AJÁNLOTT",
             data=md_zip_bytes,
