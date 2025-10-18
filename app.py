@@ -17,7 +17,7 @@ import streamlit as st
 st.set_page_config(page_title="Notion MD → ChatGPT", page_icon="🧩", layout="wide")
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Helpers: run_id, normalize (csak belső matchinghez), slug, safe filename
+# Helpers: run_id, normalizálás, slug, biztonságos fájlnév
 # ────────────────────────────────────────────────────────────────────────────────
 def run_id() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -38,17 +38,24 @@ def slugify(s: str, maxlen: int = 100) -> str:
     s = re.sub(r"[^a-z0-9_]+", "", s)
     return s[:maxlen] if len(s) > maxlen else s
 
-def safe_filename(title: str, page_id: Optional[str] = None, maxlen: int = 140) -> str:
-    """Ékezeteket meghagyjuk; csak tiltott fájlneveket cserélünk."""
-    base = title.strip() if title else "untitled"
+def safe_filename_preserve_accents(title: str, maxlen: int = 180) -> str:
+    """
+    Ékezeteket meghagyjuk; tiltott fájlrendszer-karaktereket cserélünk.
+    """
+    base = title or "untitled"
+    base = unicodedata.normalize("NFC", base)
     base = re.sub(r'[\\/:*?"<>|]+', "_", base)
     base = re.sub(r"\s+", " ", base).strip()
-    if page_id:
-        base = f"{base} {page_id}"
     if len(base) > maxlen:
         base = base[:maxlen].rstrip()
-    if not base:
-        base = page_id or "untitled"
+    return base or "untitled"
+
+def build_md_filename(title: str, sorszam: Optional[int], page_id: Optional[str]) -> str:
+    if isinstance(sorszam, int) and sorszam >= 0:
+        base = f"{sorszam}-{title}"
+        return safe_filename_preserve_accents(base) + ".md"
+    # fallback (ha nincs sorszám)
+    base = safe_filename_preserve_accents(title + (f" {page_id}" if page_id else ""))
     return base + ".md"
 
 def extract_page_id_from_filename(name: str) -> Optional[str]:
@@ -231,7 +238,7 @@ def strip_bold_emphasis(md: str) -> str:
     return "\n".join(out).strip()
 
 # ────────────────────────────────────────────────────────────────────────────────
-# JSONL chunkolás (ELŐRE definiálva, hogy biztosan lássuk a híváskor)
+# JSONL chunkolás
 # ────────────────────────────────────────────────────────────────────────────────
 def split_by_paragraph(md: str) -> List[str]:
     out = []
@@ -345,9 +352,7 @@ def extract_tables(md: str) -> Tuple[str, List[Dict]]:
                 rows.append(_split_md_row(ln))
                 j += 1
             if headers and rows:
-                # félkövér tisztítás a cellákban
                 clean_headers = [strip_bold_emphasis(h) for h in headers]
-                # normalizált kulcsok, ütközések kezelése
                 keys = []
                 seen = set()
                 for h in clean_headers:
@@ -380,7 +385,6 @@ def extract_tables(md: str) -> Tuple[str, List[Dict]]:
     if not tables:
         return md, []
 
-    # Az MD végére illesztünk egy összefoglaló szekciót JSON-okkal
     out = [md, "", "## Adattáblák (gépi kivonat)", ""]
     for idx, t in enumerate(tables, start=1):
         out.append(f"### Táblázat {idx}")
@@ -436,6 +440,75 @@ def extract_page_title(md: str, fallback: str) -> str:
     return fallback
 
 # ────────────────────────────────────────────────────────────────────────────────
+# Metaadat-parzolás (fejléc utáni kulcs: érték sorok)
+# ────────────────────────────────────────────────────────────────────────────────
+# Kulcs aliasok → kanonikus meta_kulcs
+_META_ALIASES = {
+    "szakasz": ["szakasz", "section", "fejezet", "modul"],
+    "video_statusz": ["videó státusz", "video statusz", "videostatusz", "videó status", "videostatus"],
+    "lecke_hossza": ["lecke hossza", "lesson length", "hossz"],
+    "utolso_modositas": ["utolsó módosítás", "utolso modositas", "last modified", "utolsó módosítás dátuma"],
+    "tipus": ["típus", "tipus", "type"],
+    "kurzus": ["kurzus", "course"],
+    "vimeo_link": ["vimeo link", "vimeo url", "vimeo", "videó url", "video url"],
+    "sorszam": ["sorszám", "sorszam", "order", "index", "rank"],
+}
+
+def _canon_key(raw_key: str) -> Optional[str]:
+    nk = normalize(raw_key)
+    for can, alist in _META_ALIASES.items():
+        for a in alist:
+            if normalize(a) == nk:
+                return can
+    return None
+
+META_LINE_RE = re.compile(r"^\s*([^\:]{1,120})\s*:\s*(.+?)\s*$")
+
+def parse_metadata_block(full_md: str) -> Dict[str, Optional[str]]:
+    """
+    A H1 után, a következő H2-ig terjedő blokkban keresi a 'Kulcs: érték' sorokat.
+    Vissza: meta dict kanonikus kulcsokkal (stringek), 'sorszam' → int-ként is parse-olható.
+    """
+    lines = (full_md or "").splitlines()
+    i = 0
+    # Ugorjunk az első H1 utánra
+    while i < len(lines):
+        if HEADING_RE.match(lines[i]) and len(HEADING_RE.match(lines[i]).group(1)) == 1:  # type: ignore
+            i += 1
+            break
+        i += 1
+
+    meta: Dict[str, Optional[str]] = {}
+    while i < len(lines):
+        ln = lines[i].rstrip("\n")
+        if HEADING_RE.match(ln) and len(HEADING_RE.match(ln).group(1)) >= 2:  # type: ignore
+            break
+        if not ln.strip():
+            i += 1
+            continue
+        m = META_LINE_RE.match(ln)
+        if m:
+            raw_k = m.group(1).strip()
+            val = m.group(2).strip()
+            ck = _canon_key(raw_k)
+            if ck:
+                meta[ck] = val
+        i += 1
+    return meta
+
+def meta_sorszam_as_int(meta: Dict[str, Optional[str]]) -> Optional[int]:
+    v = (meta.get("sorszam") or "").strip()
+    if not v:
+        return None
+    m = re.search(r"\d+", v.replace(" ", ""))
+    if not m:
+        return None
+    try:
+        return int(m.group(0))
+    except Exception:
+        return None
+
+# ────────────────────────────────────────────────────────────────────────────────
 # Konverzió (fő logika) – JSONL + CSV + Report + Clean MD + Tables JSONL
 # ────────────────────────────────────────────────────────────────────────────────
 def convert_zip_to_datasets(
@@ -461,7 +534,15 @@ def convert_zip_to_datasets(
     csv_w = csv.writer(csv_buf, lineterminator="\n")
     rep_w = csv.writer(rep_buf, lineterminator="\n")
 
-    csv_w.writerow(["file_name", "page_id", "page_title", "selected_section", "selected_heading", "char_len", "tartalom"])
+    # CSV fejléc – kiegészítve meta oszlopokkal
+    csv_w.writerow([
+        "file_name", "page_id", "page_title",
+        "selected_section", "selected_heading",
+        "char_len", "tartalom",
+        "meta_szakasz", "meta_video_statusz", "meta_lecke_hossza",
+        "meta_utolso_modositas", "meta_tipus", "meta_kurzus",
+        "meta_vimeo_link", "meta_sorszam"
+    ])
     rep_w.writerow(["file_name", "page_id", "page_title", "video_len", "lesson_len", "selected", "selected_len"])
 
     # Tisztított MD-k külön ZIP-be
@@ -478,6 +559,10 @@ def convert_zip_to_datasets(
     for idx, (fname, text) in enumerate(md_files, start=1):
         page_id = extract_page_id_from_filename(fname) or ""
         title = extract_page_title(text, fallback=os.path.splitext(os.path.basename(fname))[0])
+
+        # Metaadatok a H1 utáni blokkból
+        meta = parse_metadata_block(text)
+        sorsz_int = meta_sorszam_as_int(meta)
 
         # Szétbontás szekciókra és választás
         sections = split_markdown_sections(text)
@@ -497,6 +582,26 @@ def convert_zip_to_datasets(
         md_with_tables, tables = extract_tables(cleaned)
 
         # JSONL / CSV írás
+        base_rec = {
+            "run_id": rid,
+            "doc_id": f"{slugify(title)}_{(page_id or 'noid')}",
+            "page_id": page_id,
+            "file_name": os.path.basename(fname),
+            "page_title": title,
+            "selected_section": selected,
+            "selected_heading": selected_heading,
+            "char_len": len(md_with_tables),
+            # meta:
+            "meta_szakasz": meta.get("szakasz") or "",
+            "meta_video_statusz": meta.get("video_statusz") or "",
+            "meta_lecke_hossza": meta.get("lecke_hossza") or "",
+            "meta_utolso_modositas": meta.get("utolso_modositas") or "",
+            "meta_tipus": meta.get("tipus") or "",
+            "meta_kurzus": meta.get("kurzus") or "",
+            "meta_vimeo_link": meta.get("vimeo_link") or "",
+            "meta_sorszam": sorsz_int if sorsz_int is not None else "",
+        }
+
         if do_chunk:
             try:
                 parts = chunk_markdown(md_with_tables, target_chars, overlap_chars)
@@ -504,33 +609,15 @@ def convert_zip_to_datasets(
                 st.warning(f"Chunkolás közbeni hiba: {e}. Teljes szöveg egy blokkban mentve.")
                 parts = [{"text": md_with_tables, "start": 0, "end": len(md_with_tables)}]
             for i, ch in enumerate(parts, start=1):
-                rec = {
-                    "run_id": rid,
-                    "doc_id": f"{slugify(title)}_{(page_id or 'noid')}",
-                    "page_id": page_id,
-                    "file_name": os.path.basename(fname),
-                    "page_title": title,
-                    "selected_section": selected,
-                    "selected_heading": selected_heading,
-                    "chunk_index": i,
-                    "text_markdown": ch["text"],
-                    "char_len": len(ch["text"]),
-                }
+                rec = dict(base_rec)
+                rec.update({"chunk_index": i, "text_markdown": ch["text"], "char_len": len(ch["text"])})
                 jsonl_buf.write(json.dumps(rec, ensure_ascii=False) + "\n")
         else:
-            rec = {
-                "run_id": rid,
-                "doc_id": f"{slugify(title)}_{(page_id or 'noid')}",
-                "page_id": page_id,
-                "file_name": os.path.basename(fname),
-                "page_title": title,
-                "selected_section": selected,
-                "selected_heading": selected_heading,
-                "text_markdown": md_with_tables,   # a táblák gépi kivonata is benne a végén
-                "char_len": len(md_with_tables),
-            }
+            rec = dict(base_rec)
+            rec.update({"text_markdown": md_with_tables})
             jsonl_buf.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
+        # CSV sor
         csv_w.writerow([
             os.path.basename(fname),
             page_id,
@@ -538,9 +625,13 @@ def convert_zip_to_datasets(
             selected,
             selected_heading,
             len(md_with_tables),
-            md_with_tables
+            md_with_tables,
+            base_rec["meta_szakasz"], base_rec["meta_video_statusz"], base_rec["meta_lecke_hossza"],
+            base_rec["meta_utolso_modositas"], base_rec["meta_tipus"], base_rec["meta_kurzus"],
+            base_rec["meta_vimeo_link"], base_rec["meta_sorszam"]
         ])
 
+        # Riport
         rep_w.writerow([
             os.path.basename(fname),
             page_id,
@@ -551,8 +642,8 @@ def convert_zip_to_datasets(
             len(md_with_tables)
         ])
 
-        # Tisztított MD fájl (emberbarát + végén gépi kivonat)
-        md_name = safe_filename(title, page_id=page_id)
+        # Tisztított MD fájl (emberbarát + végén gépi kivonat), Sorszám-előtaggal
+        md_name = build_md_filename(title, sorsz_int, page_id)
         md_lines = []
         if title: md_lines.append(f"# {title}")
         if selected_heading: md_lines.append(f"## {selected_heading}")
@@ -572,7 +663,18 @@ def convert_zip_to_datasets(
                 "selected_heading": selected_heading,
                 "table_index": t_index,
                 "headers": t["headers"],
-                "rows": t["rows"]
+                "rows": t["rows"],
+                # meta is hasznos lehet a táblákhoz is:
+                "meta": {
+                    "szakasz": base_rec["meta_szakasz"],
+                    "video_statusz": base_rec["meta_video_statusz"],
+                    "lecke_hossza": base_rec["meta_lecke_hossza"],
+                    "utolso_modositas": base_rec["meta_utolso_modositas"],
+                    "tipus": base_rec["meta_tipus"],
+                    "kurzus": base_rec["meta_kurzus"],
+                    "vimeo_link": base_rec["meta_vimeo_link"],
+                    "sorszam": base_rec["meta_sorszam"],
+                }
             }, ensure_ascii=False) + "\n")
 
         ok += 1
@@ -599,14 +701,16 @@ def convert_zip_to_datasets(
 # UI
 # ────────────────────────────────────────────────────────────────────────────────
 st.title("🧩 Notion Markdown → ChatGPT (JSONL/CSV/MD) konverter")
-st.caption("Duplikációk kizárása (Videó→Lecke), félkövér tisztítás, táblázatok gépi kivonata. UTF-8/ékezet, CSV BOM-mal.")
+st.caption("Duplikációk kizárása (Videó→Lecke), félkövér tisztítás, táblázatok gépi kivonata. Metaadatok kinyerése és Sorszám-előtag az MD fájlnevekben. UTF-8, CSV BOM.")
 
 with st.expander("Mi ez?"):
     st.markdown(
         "- Tölts fel egy **Notion export ZIP**-et (Markdown & CSV exportból a ZIP-et használd).\n"
         "- A konverter a **„Videó szövege”** (vagy rokon címke) tartalmat vágja ki; ha üres, akkor a **„Lecke szövege”**-t.\n"
-        "- A félkövér (**…**) jelölést **eltávolítja** a jobb gépi feldolgozhatóságért (kódblokkok érintetlenek).\n"
-        "- A táblázatokat (GFM) felismeri és **JSON kivonatot** is készít róluk.\n"
+        "- A félkövér (**…**) jelölést eltávolítja (kódblokkok érintetlenek).\n"
+        "- A táblázatokat (GFM) felismeri és **JSON kivonatot** készít róluk.\n"
+        "- **Metaadatokat** is kinyer: *Szakasz, Videó státusz, Lecke hossza, Utolsó módosítás, Típus, Kurzus, Vimeo link, Sorszám*.\n"
+        "- A tisztított MD fájl **fájlnévének elejére** kerül a **Sorszám** (pl. `20-Cím.md`).\n"
         "- Kimenet: **JSONL** (szöveg), **CSV**, **riport CSV**, **tisztított MD-k (ZIP)**, **táblázatok (JSONL)**.\n"
         "- Opcionális: **chunkolás** átfedéssel (JSONL-hoz)."
     )
@@ -646,7 +750,7 @@ if uploaded is not None:
 
         # Minden egyben (ZIP): JSONL + CSV-k + CLEAN MD-k + táblázatok JSONL
         all_buf = io.BytesIO()
-        with zipfile.ZipFile(all_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        with zipfile.ZipFile(all_buf, "w", compression=zipfile.Zip_DEFLATED) as zf:
             zf.writestr("output.jsonl", jsonl_bytes)
             zf.writestr("output.csv", csv_bytes)         # BOM-os
             zf.writestr("report.csv", rep_bytes)         # BOM-os
