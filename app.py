@@ -231,6 +231,63 @@ def strip_bold_emphasis(md: str) -> str:
     return "\n".join(out).strip()
 
 # ────────────────────────────────────────────────────────────────────────────────
+# JSONL chunkolás (ELŐRE definiálva, hogy biztosan lássuk a híváskor)
+# ────────────────────────────────────────────────────────────────────────────────
+def split_by_paragraph(md: str) -> List[str]:
+    out = []
+    if not md:
+        return out
+    lines = md.split("\n")
+    buf = []
+    in_code = False
+    for ln in lines:
+        if re.match(r"^\s*```", ln):
+            in_code = not in_code
+        if not in_code and ln.strip() == "":
+            if buf:
+                out.append("\n".join(buf))
+                buf = []
+        else:
+            buf.append(ln)
+    if buf:
+        out.append("\n".join(buf))
+    return out
+
+def chunk_markdown(md: str, target_chars: int = 5500, overlap_chars: int = 400) -> List[Dict]:
+    if not md:
+        return [{"text": "", "start": 0, "end": 0}]
+    paras = split_by_paragraph(md)
+    chunks: List[Dict] = []
+    buf: List[str] = []
+    size = 0
+    start = 0
+    for p in paras:
+        plen = len(p) + 2
+        if size + plen > target_chars and size > 0:
+            text = "\n\n".join(buf).strip()
+            end = start + len(text)
+            chunks.append({"text": text, "start": start, "end": end})
+            # overlap
+            back = []
+            backsize = 0
+            for q in reversed(buf):
+                qlen = len(q) + 2
+                if backsize + qlen > overlap_chars and back:
+                    break
+                back.append(q)
+                backsize += qlen
+            buf = list(reversed(back))
+            size = sum(len(x) + 2 for x in buf)
+            start = end - size
+        buf.append(p)
+        size += plen
+    if buf:
+        text = "\n\n".join(buf).strip()
+        end = start + len(text)
+        chunks.append({"text": text, "start": start, "end": end})
+    return chunks
+
+# ────────────────────────────────────────────────────────────────────────────────
 # Táblázat detektálás és JSON-kivonat
 # ────────────────────────────────────────────────────────────────────────────────
 ALIGN_RE = re.compile(r'^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$')
@@ -252,7 +309,6 @@ def _split_md_row(line: str) -> List[str]:
             cells.append("".join(buf).strip()); buf = []; continue
         buf.append(ch)
     cells.append("".join(buf).strip())
-    # Távolítsuk el a kezdő/záró pipe miatti üres elemeket
     if cells and cells[0] == "": cells = cells[1:]
     if cells and cells[-1] == "": cells = cells[:-1]
     return cells
@@ -267,8 +323,6 @@ def extract_tables(md: str) -> Tuple[str, List[Dict]]:
     """
     Kinyeri a GFM táblákat a markdownból és JSON-osítja.
     Vissza: (md_with_tables_json_section, tables_list)
-      - md_with_tables_json_section: az eredeti (tisztított) md + "Adattáblák (gépi kivonat)" szekció kódblokkokkal
-      - tables_list: [{headers:[..], rows:[{..},..]}, ...]
     """
     if not md:
         return md, []
@@ -276,7 +330,6 @@ def extract_tables(md: str) -> Tuple[str, List[Dict]]:
     lines = md.splitlines()
     tables = []
     i = 0
-    used_sections = []
     while i < len(lines) - 1:
         header_line = lines[i]
         sep_line = lines[i + 1]
@@ -307,7 +360,6 @@ def extract_tables(md: str) -> Tuple[str, List[Dict]]:
                     keys.append(k); seen.add(k)
                 row_objs = []
                 for r in rows:
-                    # kiegyenlítés (rövidebb/hosszabb sorok)
                     if len(r) < len(keys):
                         r = r + [""] * (len(keys) - len(r))
                     elif len(r) > len(keys):
@@ -321,7 +373,6 @@ def extract_tables(md: str) -> Tuple[str, List[Dict]]:
                     "start": i,
                     "end": j - 1,
                 })
-                used_sections.append((i, j - 1))
                 i = j
                 continue
         i += 1
@@ -391,7 +442,7 @@ def convert_zip_to_datasets(
     zip_bytes: bytes,
     video_labels: List[str],
     lesson_labels: List[str],
-    chunk: bool,
+    do_chunk: bool,
     target_chars: int,
     overlap_chars: int
 ) -> Tuple[bytes, bytes, bytes, bytes, bytes]:
@@ -446,8 +497,12 @@ def convert_zip_to_datasets(
         md_with_tables, tables = extract_tables(cleaned)
 
         # JSONL / CSV írás
-        if chunk:
-            parts = chunk_markdown(md_with_tables, target_chars, overlap_chars)
+        if do_chunk:
+            try:
+                parts = chunk_markdown(md_with_tables, target_chars, overlap_chars)
+            except Exception as e:
+                st.warning(f"Chunkolás közbeni hiba: {e}. Teljes szöveg egy blokkban mentve.")
+                parts = [{"text": md_with_tables, "start": 0, "end": len(md_with_tables)}]
             for i, ch in enumerate(parts, start=1):
                 rec = {
                     "run_id": rid,
@@ -550,7 +605,7 @@ with st.expander("Mi ez?"):
     st.markdown(
         "- Tölts fel egy **Notion export ZIP**-et (Markdown & CSV exportból a ZIP-et használd).\n"
         "- A konverter a **„Videó szövege”** (vagy rokon címke) tartalmat vágja ki; ha üres, akkor a **„Lecke szövege”**-t.\n"
-        "- A félkövér (**…**) jelölést **eltávolítja** a jobb gépi feldolgozhatóságért.\n"
+        "- A félkövér (**…**) jelölést **eltávolítja** a jobb gépi feldolgozhatóságért (kódblokkok érintetlenek).\n"
         "- A táblázatokat (GFM) felismeri és **JSON kivonatot** is készít róluk.\n"
         "- Kimenet: **JSONL** (szöveg), **CSV**, **riport CSV**, **tisztított MD-k (ZIP)**, **táblázatok (JSONL)**.\n"
         "- Opcionális: **chunkolás** átfedéssel (JSONL-hoz)."
@@ -567,7 +622,7 @@ lesson_labels_str = st.sidebar.text_area(
     value="\n".join(DEFAULT_LESSON_LABELS),
     height=120
 )
-chunk = st.sidebar.checkbox("JSONL chunkolása", value=True)
+do_chunk = st.sidebar.checkbox("JSONL chunkolása", value=True)
 target_chars = st.sidebar.number_input("Chunk célszélesség (karakter)", min_value=1000, max_value=20000, value=5500, step=500)
 overlap_chars = st.sidebar.number_input("Chunk átfedés (karakter)", min_value=0, max_value=5000, value=400, step=50)
 
@@ -584,7 +639,7 @@ if uploaded is not None:
         t0 = time.time()
         (jsonl_bytes, csv_bytes, rep_bytes,
          md_zip_bytes, tables_jsonl_bytes) = convert_zip_to_datasets(
-            uploaded.read(), vlabels, llabels, chunk, int(target_chars), int(overlap_chars)
+            uploaded.read(), vlabels, llabels, do_chunk, int(target_chars), int(overlap_chars)
         )
 
         rid = run_id()
