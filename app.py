@@ -58,14 +58,14 @@ def safe_filename_preserve_accents(s: str) -> str:
 
 def build_md_filename(title: str, sorsz_int: Optional[int], page_id: Optional[str], szakasz: Optional[str] = None) -> str:
     """
-    Kért séma: 'Sorszám - Szakasz - Név.md'
+    Kért séma: 'Szakasz - Sorszám - Név.md'
     - ha bármelyik hiányzik, kulturáltan kihagyjuk
     """
     parts = []
-    if sorsz_int is not None:
-        parts.append(str(sorsz_int))
     if szakasz:
         parts.append(safe_filename_preserve_accents(szakasz))
+    if sorsz_int is not None:
+        parts.append(str(sorsz_int))
     if title:
         parts.append(safe_filename_preserve_accents(title))
     base = " - ".join(parts) if parts else "cikk"
@@ -612,7 +612,7 @@ def convert_zip_to_datasets(
 
     total = len(md_files)
     ok = 0
-    skipped = 0  # megmarad, de nem fog nőni, mivel nincs szűrés
+    skipped = 0  # nincs szűrés, nem nő
     progress = st.progress(0.0, text=f"0/{total} feldolgozva (✅: 0, kihagyva: 0)")
 
     for idx, (fname, text) in enumerate(md_files, start=1):
@@ -622,8 +622,6 @@ def convert_zip_to_datasets(
         # Metaadatok a H1 utáni blokkból
         meta = parse_metadata_block(text)
         sorsz_int = meta_sorszam_as_int(meta)
-
-        # (A „✅ Kész” szűrő el lett távolítva.)
 
         # Szétbontás szekciókra és választás
         sections = split_markdown_sections(text)
