@@ -56,14 +56,14 @@ def safe_filename_preserve_accents(s: str) -> str:
     return s or "file"
 
 
-def build_md_filename(title: str, sorsz_int: Optional[int], page_id: Optional[str], szakasz: Optional[str] = None) -> str:
+def build_md_filename(title: str, sorsz_int: Optional[int], page_id: Optional[str], kurzus: Optional[str] = None) -> str:
     """
-    Kért séma: 'Szakasz - Sorszám - Név.md'
+    Kért séma: 'Kurzus - Sorszám - Név.md'
     - ha bármelyik hiányzik, kulturáltan kihagyjuk
     """
     parts = []
-    if szakasz:
-        parts.append(safe_filename_preserve_accents(szakasz))
+    if kurzus:
+        parts.append(safe_filename_preserve_accents(kurzus))
     if sorsz_int is not None:
         parts.append(str(sorsz_int))
     if title:
@@ -266,7 +266,7 @@ def strip_bold_emphasis(md: str) -> str:
             out.append(line)
             continue
         # inline code védelme: daraboljuk backtick alapján
-        parts = re.split(r"(`[^`]*`)", line)
+        parts = re.split(r"(`[^`]*`)",""" + r""" line)
         for i, part in enumerate(parts):
             if i % 2 == 0:  # nem inline code
                 part = bold_ast.sub(r"\1", part)
@@ -715,7 +715,7 @@ def convert_zip_to_datasets(
         ])
 
         # ── Tisztított MD készítése meta blokkal a H1 után ──────────────────────
-        md_name_base = build_md_filename(title, sorsz_int, page_id, meta.get("szakasz") or "")
+        md_name_base = build_md_filename(title, sorsz_int, page_id, meta.get("kurzus") or "")
         md_name = uniquify_filename(md_name_base, used_names, page_id)
 
         # Meta címkék megjelenítési sorrendben
@@ -860,7 +860,7 @@ if uploaded is not None:
             data=tables_jsonl_bytes,
             file_name=f"tables_{rid}.jsonl",
             mime="application/json",
-                use_container_width=True
+            use_container_width=True
         )
 
         # MINDEN EGYBEN ZIP
