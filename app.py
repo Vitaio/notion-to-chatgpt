@@ -56,14 +56,43 @@ def safe_filename_preserve_accents(s: str) -> str:
     return s or "file"
 
 
-def build_md_filename(title: str, sorsz_int: Optional[int], page_id: Optional[str]) -> str:
-    base = safe_filename_preserve_accents(title or "cikk")
+def build_md_filename(title: str, sorsz_int: Optional[int], page_id: Optional[str], szakasz: Optional[str] = None) -> str:
+    """
+    Kért séma: 'Sorszám - Szakasz - Név.md'
+    - ha bármelyik hiányzik, kulturáltan kihagyjuk
+    """
+    parts = []
     if sorsz_int is not None:
-        base = f"{sorsz_int}-{base}"
-    # page_id opcionális suffixként
-    if page_id:
-        base = f"{base}"
+        parts.append(str(sorsz_int))
+    if szakasz:
+        parts.append(safe_filename_preserve_accents(szakasz))
+    if title:
+        parts.append(safe_filename_preserve_accents(title))
+    base = " - ".join(parts) if parts else "cikk"
     return f"{base}.md"
+
+
+def uniquify_filename(name: str, used: set, page_id: Optional[str] = None) -> str:
+    """
+    Ha már létezik adott név a ZIP-ben, egészítsük ki rövid page_id-vel,
+    ha az is ütközik, tegyünk sorszámozott zárójelet.
+    """
+    if name not in used:
+        used.add(name)
+        return name
+    stem, ext = os.path.splitext(name)
+    if page_id:
+        candidate = f"{stem} - {page_id[:8]}{ext}"
+        if candidate not in used:
+            used.add(candidate)
+            return candidate
+    i = 2
+    while True:
+        candidate = f"{stem} ({i}){ext}"
+        if candidate not in used:
+            used.add(candidate)
+            return candidate
+        i += 1
 
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -208,7 +237,7 @@ def renumber_ordered_lists(md: str) -> str:
                 if k > lvl:
                     del counters[k]
             newnum = counters[lvl]
-            # ↓↓↓ JAVÍTÁS: \1 helyett \g<1>, hogy ne legyen \11, \110 stb. csoport hivatkozás ↓↓↓
+            # FIX: \1 helyett \g<1>, hogy ne legyen \11, \110 stb. csoport hivatkozás
             line = list_item.sub(r"\g<1>{0}. ".format(newnum), line, count=1)
             out.append(line)
         else:
@@ -576,13 +605,15 @@ def convert_zip_to_datasets(
     # Tisztított MD-k külön ZIP-be
     md_zip_buf = io.BytesIO()
     md_zip = zipfile.ZipFile(md_zip_buf, "w", compression=zipfile.ZIP_DEFLATED)
+    used_names = set()  # ← ütközéskezelés a ZIP-ben
 
     # Táblázatok külön JSONL-be (összes dokumentum)
     tables_jsonl_buf = io.StringIO()
 
     total = len(md_files)
     ok = 0
-    progress = st.progress(0.0, text=f"0/{total} feldolgozva")
+    skipped = 0
+    progress = st.progress(0.0, text=f"0/{total} feldolgozva (✅: 0, kihagyva: 0)")
 
     for idx, (fname, text) in enumerate(md_files, start=1):
         page_id = extract_page_id_from_filename(fname) or ""
@@ -595,6 +626,9 @@ def convert_zip_to_datasets(
         # --- SZŰRŐ: Csak a '✅ Kész' státuszú oldalakat dolgozzuk fel ---
         status_val = (meta.get("video_statusz") or "").strip()
         if status_val != "✅ Kész":
+            skipped += 1
+            pct = idx / max(1, total)
+            progress.progress(pct, text=f"{idx}/{total} feldolgozva (✅: {ok}, kihagyva: {skipped})")
             continue
 
         # Szétbontás szekciókra és választás
@@ -689,7 +723,8 @@ def convert_zip_to_datasets(
         ])
 
         # ── Tisztított MD készítése meta blokkal a H1 után ──────────────────────
-        md_name = build_md_filename(title, sorsz_int, page_id)
+        md_name_base = build_md_filename(title, sorsz_int, page_id, meta.get("szakasz") or "")
+        md_name = uniquify_filename(md_name_base, used_names, page_id)
 
         # Meta címkék megjelenítési sorrendben
         meta_labels = [
@@ -721,8 +756,8 @@ def convert_zip_to_datasets(
         md_zip.writestr(md_name, clean_md_text.encode("utf-8"))
 
         ok += 1
-        pct = ok / max(1, total)
-        progress.progress(pct, text=f"{ok}/{total} feldolgozva")
+        pct = idx / max(1, total)  # ← valós feldolgozási előrehaladás
+        progress.progress(pct, text=f"{idx}/{total} feldolgozva (✅: {ok}, kihagyva: {skipped})")
 
     # Zárások és kimenetek előállítása
     md_zip.close()
