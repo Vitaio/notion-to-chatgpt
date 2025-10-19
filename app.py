@@ -266,7 +266,7 @@ def strip_bold_emphasis(md: str) -> str:
             out.append(line)
             continue
         # inline code védelme: daraboljuk backtick alapján
-        parts = re.split(r"(`[^`]*`)",""" + r""" line)
+        parts = re.split(r"(`[^`]*`)", line)
         for i, part in enumerate(parts):
             if i % 2 == 0:  # nem inline code
                 part = bold_ast.sub(r"\1", part)
