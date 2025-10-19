@@ -612,7 +612,7 @@ def convert_zip_to_datasets(
 
     total = len(md_files)
     ok = 0
-    skipped = 0
+    skipped = 0  # megmarad, de nem fog nőni, mivel nincs szűrés
     progress = st.progress(0.0, text=f"0/{total} feldolgozva (✅: 0, kihagyva: 0)")
 
     for idx, (fname, text) in enumerate(md_files, start=1):
@@ -623,13 +623,7 @@ def convert_zip_to_datasets(
         meta = parse_metadata_block(text)
         sorsz_int = meta_sorszam_as_int(meta)
 
-        # --- SZŰRŐ: Csak a '✅ Kész' státuszú oldalakat dolgozzuk fel ---
-        status_val = (meta.get("video_statusz") or "").strip()
-        if status_val != "✅ Kész":
-            skipped += 1
-            pct = idx / max(1, total)
-            progress.progress(pct, text=f"{idx}/{total} feldolgozva (✅: {ok}, kihagyva: {skipped})")
-            continue
+        # (A „✅ Kész” szűrő el lett távolítva.)
 
         # Szétbontás szekciókra és választás
         sections = split_markdown_sections(text)
@@ -868,7 +862,7 @@ if uploaded is not None:
             data=tables_jsonl_bytes,
             file_name=f"tables_{rid}.jsonl",
             mime="application/json",
-            use_container_width=True
+                use_container_width=True
         )
 
         # MINDEN EGYBEN ZIP
