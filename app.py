@@ -208,7 +208,8 @@ def renumber_ordered_lists(md: str) -> str:
                 if k > lvl:
                     del counters[k]
             newnum = counters[lvl]
-            line = list_item.sub(rf"\1{newnum}. ", line, count=1)
+            # ↓↓↓ JAVÍTÁS: \1 helyett \g<1>, hogy ne legyen \11, \110 stb. csoport hivatkozás ↓↓↓
+            line = list_item.sub(r"\g<1>{0}. ".format(newnum), line, count=1)
             out.append(line)
         else:
             out.append(line)
@@ -410,7 +411,8 @@ def parse_metadata_block(full_md: str) -> Dict[str, Optional[str]]:
     i = 0
     # Ugorjunk az első H1 utánra
     while i < len(lines):
-        if HEADING_RE.match(lines[i]) and len(HEADING_RE.match(lines[i]).group(1)) == 1:  # type: ignore
+        m = HEADING_RE.match(lines[i])
+        if m and len(m.group(1)) == 1:
             i += 1
             break
         i += 1
@@ -418,7 +420,8 @@ def parse_metadata_block(full_md: str) -> Dict[str, Optional[str]]:
     meta: Dict[str, Optional[str]] = {}
     while i < len(lines):
         ln = lines[i].rstrip("\n")
-        if HEADING_RE.match(ln) and len(HEADING_RE.match(ln).group(1)) >= 2:  # type: ignore
+        m = HEADING_RE.match(ln)
+        if m and len(m.group(1)) >= 2:
             break
         if not ln.strip():
             i += 1
