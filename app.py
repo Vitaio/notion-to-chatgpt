@@ -14,85 +14,94 @@ import streamlit as st
 # ────────────────────────────────────────────────────────────────────────────────
 # Streamlit config
 # ────────────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Notion MD → ChatGPT", page_icon="🧩", layout="wide")
+
+st.set_page_config(
+    page_title="Notion → Markdown/JSONL/CSV konverter",
+    page_icon="📦",
+    layout="centered",
+)
+
+st.title("📦 Notion → Markdown/JSONL/CSV konverter")
+st.caption("Notion Markdown exportból kinyeri a **Videó/Lecke** szöveget, tisztít, chunkol (opcionális), és táblázat-kivonatot készít.")
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Helpers: run_id, normalizálás, slug, biztonságos fájlnév
+# Kis segédek
 # ────────────────────────────────────────────────────────────────────────────────
+
 def run_id() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
+
 def normalize(s: str) -> str:
-    """Ékezet/írásjel-agnosztikus összehasonlításhoz (belső matching)."""
-    if s is None:
+    if not s:
         return ""
-    s = unicodedata.normalize("NFKD", s)
-    s = s.encode("ascii", "ignore").decode("ascii")
     s = s.strip().lower()
-    s = re.sub(r"[^\w\s]", " ", s)
-    s = re.sub(r"\s+", " ", s)
+    s = "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
+    s = re.sub(r"[^a-z0-9]+", " ", s).strip()
     return s
 
-def slugify(s: str, maxlen: int = 100) -> str:
-    s = normalize(s).replace(" ", "_")
-    s = re.sub(r"[^a-z0-9_]+", "", s)
-    return s[:maxlen] if len(s) > maxlen else s
 
-def safe_filename_preserve_accents(title: str, maxlen: int = 180) -> str:
-    """
-    Ékezeteket meghagyjuk; tiltott fájlrendszer-karaktereket cserélünk.
-    """
-    base = title or "untitled"
-    base = unicodedata.normalize("NFC", base)
-    base = re.sub(r'[\\/:*?"<>|]+', "_", base)
-    base = re.sub(r"\s+", " ", base).strip()
-    if len(base) > maxlen:
-        base = base[:maxlen].rstrip()
-    return base or "untitled"
+def slugify(s: str) -> str:
+    s = normalize(s)
+    s = re.sub(r"\s+", "-", s)
+    s = re.sub(r"[^a-z0-9\-]+", "", s)
+    return s or "doc"
 
-def build_md_filename(title: str, sorszam: Optional[int], page_id: Optional[str]) -> str:
-    if isinstance(sorszam, int) and sorszam >= 0:
-        base = f"{sorszam}-{title}"
-        return safe_filename_preserve_accents(base) + ".md"
-    # fallback (ha nincs sorszám)
-    base = safe_filename_preserve_accents(title + (f" {page_id}" if page_id else ""))
-    return base + ".md"
 
-def extract_page_id_from_filename(name: str) -> Optional[str]:
-    """'Cím abcdef1234567890abcdef1234567890.md' → 32 hex azonosító"""
-    base = os.path.splitext(os.path.basename(name))[0]
-    m = re.search(r"([0-9a-fA-F]{32})$", base)
-    return m.group(1).lower() if m else None
+def safe_filename_preserve_accents(s: str) -> str:
+    # fájlnévhez engedjük az ékezeteket, de szűrjük az egyéb nem kívánt karaktereket
+    s = s.strip().replace("/", "-").replace("\\", "-")
+    s = re.sub(r"[^\w\-\.\sÁÉÍÓÖŐÚÜŰáéíóöőúüű]+", "", s, flags=re.UNICODE)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s or "file"
+
+
+def build_md_filename(title: str, sorsz_int: Optional[int], page_id: Optional[str]) -> str:
+    base = safe_filename_preserve_accents(title or "cikk")
+    if sorsz_int is not None:
+        base = f"{sorsz_int}-{base}"
+    # page_id opcionális suffixként
+    if page_id:
+        base = f"{base}"
+    return f"{base}.md"
+
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Markdown → szekciók
+# Markdown szekcionálás
 # ────────────────────────────────────────────────────────────────────────────────
-HEADING_RE = re.compile(r'^(#+)\s+(.*)$')
+
+HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 
 def split_markdown_sections(md: str) -> List[Tuple[int, str, List[str]]]:
-    """A Markdown-t heading-alapú szekciókra bontja. Vissza: (level, title, lines)."""
+    """
+    Vissza: [(szint, heading, sorok)], ahol 'sorok' a heading utáni tartalom a következő headingig.
+    """
     lines = (md or "").splitlines()
     sections: List[Tuple[int, str, List[str]]] = []
-    current_level = None
-    current_title = None
+
+    current_level = 0
+    current_title = ""
     current_buf: List[str] = []
 
     def flush():
         nonlocal current_level, current_title, current_buf
-        if current_title is not None:
-            sections.append((current_level or 0, current_title, current_buf))
-        current_level, current_title, current_buf = None, None, []
+        if current_level > 0:
+            sections.append((current_level, current_title, current_buf))
+        current_level = 0
+        current_title = ""
+        current_buf = []
 
     for ln in lines:
         m = HEADING_RE.match(ln)
         if m:
+            # új szekció
             flush()
-            level = len(m.group(1))
-            title = m.group(2).strip()
-            current_level, current_title = level, title
+            current_level = len(m.group(1))
+            current_title = m.group(2).strip()
             current_buf = []
         else:
-            if current_title is None:
+            if current_level == 0:
+                # heading előtt/után álló tartalom (H1 előtti rész)
                 current_title = ""
                 current_level = 0
                 current_buf = []
@@ -108,6 +117,7 @@ DEFAULT_VIDEO_LABELS = [
     "videó szöveg", "video szoveg", "videó leirat", "video leirat",
     "transcript", "videó", "video",
 ]
+
 DEFAULT_LESSON_LABELS = [
     "lecke szöveg", "lecke anyag", "leckeszöveg", "tananyag",
 ]
@@ -123,86 +133,84 @@ def label_match(title: str, target_tokens: List[str]) -> bool:
             return True
     return False
 
-def choose_section(
-    sections: List[Tuple[int, str, List[str]]],
-    video_labels: List[str],
-    lesson_labels: List[str],
-    min_level: int = 2,
-    max_level: int = 4
-) -> Tuple[str, str, str]:
-    """
-    Kiválasztás szabály szerint:
-      1) Videó-címkés H2–H4 nem üres → 'video'
-      2) különben Lecke-címkés H2–H4 nem üres → 'lecke'
-      3) különben 'none'
-    Vissza: (selected_section, text_markdown, selected_heading).
-    """
-    candidates: Dict[str, List[Tuple[int,str,List[str]]]] = {"video": [], "lecke": []}
-    for level, title, lines in sections:
-        if min_level <= level <= max_level:
-            if label_match(title, video_labels):
-                candidates["video"].append((level, title, lines))
-            elif label_match(title, lesson_labels):
-                candidates["lecke"].append((level, title, lines))
-
-    def text_of(sec) -> str:
-        return "\n".join(sec[2]).strip()
-
-    for sec in candidates["video"]:
-        txt = text_of(sec)
-        if txt:
-            return "video", txt, sec[1]
-    for sec in candidates["lecke"]:
-        txt = text_of(sec)
-        if txt:
-            return "lecke", txt, sec[1]
-    return "none", "", ""
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Markdown tisztítás + listák újraszámozása + félkövér eltávolítás
+# Markdown tisztítás
 # ────────────────────────────────────────────────────────────────────────────────
+
 def clean_markdown(md: str) -> str:
-    """Kíméletes tisztítás: üres sorok, címsorok előtti üres sor, idézetek stb."""
     if not md:
         return ""
-    md = re.sub(r"^(#+)([^\s#])", r"\1 \2", md, flags=re.M)     # ###Cím -> ### Cím
-    md = re.sub(r"(\n#+\s)", r"\n\n\1", md)                     # heading elé üres sor
-    md = re.sub(r"(\n>\s)", r"\n\n\1", md)                      # idézet elé üres sor
-    md = re.sub(r"\n{3,}", "\n\n", md)                          # 3+ üres sor → 1
-    md = re.sub(r"^>\s-\s", "- ", md, flags=re.M)               # idézet-lista kisimítás
-    return md.strip()
+    # headingek előtt 1 üres sor, kódblokkok megkímélése, üres sorok normalizálása
+    out = []
+    in_code = False
+    fence = re.compile(r"^\s*```")
+    prev_blank = True
+    for line in md.splitlines():
+        if fence.match(line):
+            in_code = not in_code
+            out.append(line)
+            continue
+        if in_code:
+            out.append(line)
+            continue
+        if HEADING_RE.match(line):
+            if not prev_blank:
+                out.append("")
+            out.append(line)
+            prev_blank = False
+            continue
+        if line.strip() == "":
+            if not prev_blank:
+                out.append("")
+                prev_blank = True
+            continue
+        out.append(line)
+        prev_blank = False
+    return "\n".join(out).strip()
+
 
 def renumber_ordered_lists(md: str) -> str:
-    """Számozott listák újraszámozása kódblokkokon kívül."""
+    """
+    Számozott listák újraszámozása (kódblokkokon kívül), '1.' formátum támogatott, behúzás-alapú szintek.
+    """
     if not md:
         return ""
     lines = md.splitlines()
-    out: List[str] = []
+    out = []
     in_code = False
     fence = re.compile(r"^\s*```")
-    num = re.compile(r"^(\s*)(\d+)\.\s+(.*)$")
-    counters: Dict[int, int] = {}
-    active_indent: Optional[int] = None
+    list_item = re.compile(r"^(\s*)(\d+)\.\s+")
+    counters: Dict[int, int] = {}  # indent → counter
+
+    def level_of(indent: str) -> int:
+        return len(indent.replace("\t", "    ")) // 2  # 2 space szint
+
     for line in lines:
         if fence.match(line):
             in_code = not in_code
-            out.append(line); continue
+            out.append(line)
+            continue
         if in_code:
-            out.append(line); continue
-        m = num.match(line)
+            out.append(line)
+            continue
+
+        m = list_item.match(line)
         if m:
-            indent = len(m.group(1))
-            content = m.group(3)
-            if active_indent is None or indent != active_indent:
-                active_indent = indent
-                for k in list(counters.keys()):
-                    if k >= indent: del counters[k]
-                counters[indent] = 1
+            indent = m.group(1)
+            lvl = level_of(indent)
+            if lvl not in counters:
+                counters[lvl] = 1
             else:
-                counters[indent] = counters.get(indent, 0) + 1
-            out.append(" " * indent + f"{counters[indent]}. " + content)
+                counters[lvl] += 1
+            # nullázás mélyebb szinteken
+            for k in list(counters.keys()):
+                if k > lvl:
+                    del counters[k]
+            newnum = counters[lvl]
+            line = list_item.sub(rf"\1{newnum}. ", line, count=1)
+            out.append(line)
         else:
-            active_indent = None
             out.append(line)
     return "\n".join(out).strip()
 
@@ -233,96 +241,28 @@ def strip_bold_emphasis(md: str) -> str:
             if i % 2 == 0:  # nem inline code
                 part = bold_ast.sub(r"\1", part)
                 part = bold_uscr.sub(r"\1", part)
-            parts[i] = part
-        out.append("".join(parts))
+            out.append(part)
+        # join nélkül, mert már out-hoz appendeltük részenként
+        out.append("")  # sorzárás
+    # a fenti extra üres sorok eltávolítása
+    out = [ln for ln in out if ln != ""]
     return "\n".join(out).strip()
 
 # ────────────────────────────────────────────────────────────────────────────────
-# JSONL chunkolás
+# Táblázat kinyerés
 # ────────────────────────────────────────────────────────────────────────────────
-def split_by_paragraph(md: str) -> List[str]:
-    out = []
-    if not md:
-        return out
-    lines = md.split("\n")
-    buf = []
-    in_code = False
-    for ln in lines:
-        if re.match(r"^\s*```", ln):
-            in_code = not in_code
-        if not in_code and ln.strip() == "":
-            if buf:
-                out.append("\n".join(buf))
-                buf = []
-        else:
-            buf.append(ln)
-    if buf:
-        out.append("\n".join(buf))
-    return out
 
-def chunk_markdown(md: str, target_chars: int = 5500, overlap_chars: int = 400) -> List[Dict]:
-    if not md:
-        return [{"text": "", "start": 0, "end": 0}]
-    paras = split_by_paragraph(md)
-    chunks: List[Dict] = []
-    buf: List[str] = []
-    size = 0
-    start = 0
-    for p in paras:
-        plen = len(p) + 2
-        if size + plen > target_chars and size > 0:
-            text = "\n\n".join(buf).strip()
-            end = start + len(text)
-            chunks.append({"text": text, "start": start, "end": end})
-            # overlap
-            back = []
-            backsize = 0
-            for q in reversed(buf):
-                qlen = len(q) + 2
-                if backsize + qlen > overlap_chars and back:
-                    break
-                back.append(q)
-                backsize += qlen
-            buf = list(reversed(back))
-            size = sum(len(x) + 2 for x in buf)
-            start = end - size
-        buf.append(p)
-        size += plen
-    if buf:
-        text = "\n\n".join(buf).strip()
-        end = start + len(text)
-        chunks.append({"text": text, "start": start, "end": end})
-    return chunks
+ALIGN_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
 
-# ────────────────────────────────────────────────────────────────────────────────
-# Táblázat detektálás és JSON-kivonat
-# ────────────────────────────────────────────────────────────────────────────────
-ALIGN_RE = re.compile(r'^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$')
+def _split_md_row(row: str) -> List[str]:
+    # '|' szeparálás, escape-elt \| figyelembevétele
+    toks = re.split(r"(?<!\\)\|", row.strip().strip("|"))
+    toks = [t.replace(r"\|", "|").strip() for t in toks]
+    return toks
 
-def _split_md_row(line: str) -> List[str]:
-    """Biztonságos cella-szétválasztó: figyel az escape-elt '|' és az inline code-ra."""
-    cells, buf = [], []
-    in_code = False
-    esc = False
-    for ch in line.strip():
-        if esc:
-            buf.append(ch); esc = False; continue
-        if ch == '\\':
-            esc = True; continue
-        if ch == '`':
-            in_code = not in_code
-            buf.append(ch); continue
-        if ch == '|' and not in_code:
-            cells.append("".join(buf).strip()); buf = []; continue
-        buf.append(ch)
-    cells.append("".join(buf).strip())
-    if cells and cells[0] == "": cells = cells[1:]
-    if cells and cells[-1] == "": cells = cells[:-1]
-    return cells
-
-def _normalize_key(s: str) -> str:
-    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+def _make_key_like(s: str) -> str:
     s = s.strip().lower()
+    s = "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
     s = re.sub(r"[^\w]+", "_", s).strip("_")
     return s or "col"
 
@@ -353,16 +293,7 @@ def extract_tables(md: str) -> Tuple[str, List[Dict]]:
                 j += 1
             if headers and rows:
                 clean_headers = [strip_bold_emphasis(h) for h in headers]
-                keys = []
-                seen = set()
-                for h in clean_headers:
-                    k = _normalize_key(h)
-                    if k in seen:
-                        c = 2
-                        while f"{k}_{c}" in seen:
-                            c += 1
-                        k = f"{k}_{c}"
-                    keys.append(k); seen.add(k)
+                keys = [_make_key_like(h) for h in clean_headers]
                 row_objs = []
                 for r in rows:
                     if len(r) < len(keys):
@@ -382,17 +313,17 @@ def extract_tables(md: str) -> Tuple[str, List[Dict]]:
                 continue
         i += 1
 
-    if not tables:
-        return md, []
-
-    out = [md, "", "## Adattáblák (gépi kivonat)", ""]
-    for idx, t in enumerate(tables, start=1):
-        out.append(f"### Táblázat {idx}")
-        out.append("```json")
-        out.append(json.dumps({"headers": t["headers"], "rows": t["rows"]}, ensure_ascii=False, indent=2))
-        out.append("```")
-        out.append("")
-    return "\n".join(out).strip(), tables
+    if tables:
+        out = [md.strip(), "", "## Adattáblák (gépi kivonat)", ""]
+        for idx, t in enumerate(tables, start=1):
+            out.append(f"**Táblázat {idx}**")
+            out.append("")
+            out.append("```json")
+            out.append(json.dumps(t, ensure_ascii=False, indent=2))
+            out.append("```")
+            out.append("")
+        return "\n".join(out).strip(), tables
+    return md, []
 
 # ────────────────────────────────────────────────────────────────────────────────
 # ZIP fájlnév-dekódolás + tartalom (UTF-8 + BOM támogatás)
@@ -411,25 +342,31 @@ def _fixed_zip_filename(info: zipfile.ZipInfo) -> str:
     return name
 
 def iter_markdown_files(zf: zipfile.ZipFile) -> List[Tuple[str, str]]:
-    """
-    Bejárja a ZIP-et, (arcname, text) listát ad .md fájlokra.
-    Tartalom dekódolás: 'utf-8-sig' → eltávolítja a BOM-ot.
-    """
-    md_items: List[Tuple[str, str]] = []
+    out: List[Tuple[str, str]] = []
     for info in zf.infolist():
         if info.is_dir():
             continue
-        if not info.filename.lower().endswith(".md"):
+        name = _fixed_zip_filename(info)
+        if not name.lower().endswith(".md"):
             continue
-        fixed_name = _fixed_zip_filename(info)
-        with zf.open(info, "r") as f:
-            b = f.read()
         try:
-            s = b.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            s = b.decode("utf-8", errors="replace")
-        md_items.append((fixed_name, s))
-    return md_items
+            raw = zf.read(info)
+            # BOM tolerant
+            try:
+                txt = raw.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                txt = raw.decode("utf-8", errors="replace")
+            out.append((name, txt))
+        except Exception:
+            continue
+    return out
+
+def extract_page_id_from_filename(filename: str) -> Optional[str]:
+    # Notion export fájlnevek végén gyakran ott a 32 hex page_id
+    m = re.search(r"([0-9a-f]{32})\.\w+$", filename)
+    if m:
+        return m.group(1)
+    return None
 
 def extract_page_title(md: str, fallback: str) -> str:
     # Első H1 cím (# ...)
@@ -444,7 +381,7 @@ def extract_page_title(md: str, fallback: str) -> str:
 # ────────────────────────────────────────────────────────────────────────────────
 _META_ALIASES = {
     "szakasz": ["szakasz", "section", "fejezet", "modul"],
-    "video_statusz": ["videó státusz", "video statusz", "videostatusz", "videó status", "videostatus"],
+    "video_statusz": ["videó státusz", "video statusz", "videostatusz", "videó status", "videostatus", "státusz", "statusz", "státus", "status"],
     "lecke_hossza": ["lecke hossza", "lesson length", "hossz"],
     "utolso_modositas": ["utolsó módosítás", "utolso modositas", "last modified", "utolsó módosítás dátuma"],
     "tipus": ["típus", "tipus", "type"],
@@ -465,7 +402,8 @@ META_LINE_RE = re.compile(r"^\s*([^\:]{1,120})\s*:\s*(.+?)\s*$")
 
 def parse_metadata_block(full_md: str) -> Dict[str, Optional[str]]:
     """
-    A H1 után, a következő H2-ig terjedő blokkban keresi a 'Kulcs: érték' sorokat.
+    A H1 után, a következő H2-ig terjedő blokkban keresi a
+    'Kulcs: érték' sorokat.
     Vissza: meta dict kanonikus kulcsokkal (stringek), 'sorszam' → int-ként is parse-olható.
     """
     lines = (full_md or "").splitlines()
@@ -508,6 +446,95 @@ def meta_sorszam_as_int(meta: Dict[str, Optional[str]]) -> Optional[int]:
         return None
 
 # ────────────────────────────────────────────────────────────────────────────────
+# Választás logika (Videó → Lecke → None)
+# ────────────────────────────────────────────────────────────────────────────────
+
+def choose_section(sections: List[Tuple[int, str, List[str]]], video_labels: List[str], lesson_labels: List[str]) -> Tuple[str, str, str]:
+    """
+    A címkék alapján kiválasztja a fő szöveget.
+    Elsőbbség: videó → lecke → none.
+    Vissza: (selected_section, raw_text, selected_heading)
+    """
+    video_txt = ""
+    lesson_txt = ""
+    video_heading = ""
+    lesson_heading = ""
+
+    for level, heading, lines in sections:
+        if 2 <= level <= 4:
+            if label_match(heading, video_labels):
+                video_txt = "\n".join(lines).strip()
+                video_heading = heading
+            if label_match(heading, lesson_labels):
+                lesson_txt = "\n".join(lines).strip()
+                lesson_heading = heading
+
+    if video_txt.strip():
+        return "video", video_txt, video_heading or "Videó szöveg"
+    if lesson_txt.strip():
+        return "lecke", lesson_txt, lesson_heading or "Lecke szöveg"
+    return "none", "", ""
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Chunkolás (bekezdés-határok mentén)
+# ────────────────────────────────────────────────────────────────────────────────
+
+def split_by_paragraph(text: str) -> List[str]:
+    # Kódblokkokat nem törjük meg
+    out: List[str] = []
+    in_code = False
+    fence = re.compile(r"^\s*```")
+    buf: List[str] = []
+    for ln in (text or "").splitlines():
+        if fence.match(ln):
+            in_code = not in_code
+            buf.append(ln)
+            continue
+        if in_code:
+            buf.append(ln)
+            continue
+        if ln.strip() == "":
+            if buf:
+                out.append("\n".join(buf).strip())
+                buf = []
+        else:
+            buf.append(ln)
+    if buf:
+        out.append("\n".join(buf).strip())
+    return [p for p in out if p.strip()]
+
+def chunk_markdown(text: str, target_chars: int = 5500, overlap_chars: int = 400) -> List[Dict]:
+    parts = split_by_paragraph(text)
+    if not parts:
+        return [{"text": text, "start": 0, "end": len(text)}]
+
+    chunks: List[Dict] = []
+    cur: List[str] = []
+    cur_len = 0
+    start = 0
+    for p in parts:
+        pl = len(p) + 1  # +1: bekezdés közti \n
+        if cur_len + pl > target_chars and cur:
+            s = "\n\n".join(cur).strip()
+            chunks.append({"text": s, "start": start, "end": start + len(s)})
+            # átfedéshez: vágjuk vissza a végét
+            if overlap_chars > 0:
+                overlap = s[-overlap_chars:]
+                cur = [overlap]
+                cur_len = len(overlap)
+                start = start + len(s) - overlap_chars
+            else:
+                cur = []
+                cur_len = 0
+                start = start + len(s)
+        cur.append(p)
+        cur_len += pl
+    if cur:
+        s = "\n\n".join(cur).strip()
+        chunks.append({"text": s, "start": start, "end": start + len(s)})
+    return chunks
+
+# ────────────────────────────────────────────────────────────────────────────────
 # Konverzió (fő logika) – JSONL + CSV + Report + Clean MD + Tables JSONL
 # ────────────────────────────────────────────────────────────────────────────────
 def convert_zip_to_datasets(
@@ -538,9 +565,8 @@ def convert_zip_to_datasets(
         "file_name", "page_id", "page_title",
         "selected_section", "selected_heading",
         "char_len", "tartalom",
-        "meta_szakasz", "meta_video_statusz", "meta_lecke_hossza",
-        "meta_utolso_modositas", "meta_tipus", "meta_kurzus",
-        "meta_vimeo_link", "meta_sorszam"
+        "meta_szakasz", "meta_video_statusz", "meta_lecke_hossza", "meta_utolso_modositas",
+        "meta_tipus", "meta_kurzus", "meta_vimeo_link", "meta_sorszam"
     ])
     rep_w.writerow(["file_name", "page_id", "page_title", "video_len", "lesson_len", "selected", "selected_len"])
 
@@ -563,6 +589,11 @@ def convert_zip_to_datasets(
         meta = parse_metadata_block(text)
         sorsz_int = meta_sorszam_as_int(meta)
 
+        # --- SZŰRŐ: Csak a '✅ Kész' státuszú oldalakat dolgozzuk fel ---
+        status_val = (meta.get("video_statusz") or "").strip()
+        if status_val != "✅ Kész":
+            continue
+
         # Szétbontás szekciókra és választás
         sections = split_markdown_sections(text)
         video_txt = ""; lesson_txt = ""
@@ -571,19 +602,32 @@ def convert_zip_to_datasets(
                 if label_match(heading, video_labels):  video_txt = "\n".join(lines).strip()
                 if label_match(heading, lesson_labels): lesson_txt = "\n".join(lines).strip()
 
-        selected, raw, selected_heading = choose_section(sections, video_labels, lesson_labels, 2, 4)
+        selected, raw, selected_heading = choose_section(sections, video_labels, lesson_labels)
 
-        # Tisztítás + listák + félkövér eltávolítás
-        cleaned = renumber_ordered_lists(clean_markdown(raw))
-        cleaned = strip_bold_emphasis(cleaned)
+        # tisztítás
+        raw = strip_bold_emphasis(raw)
+        raw = clean_markdown(raw)
+        raw = renumber_ordered_lists(raw)
 
-        # Táblák kinyerése és MD-hez csatolása gépi kivonattal
-        md_with_tables, tables = extract_tables(cleaned)
+        # táblázatok kivonata csak a kiválasztott szövegből
+        md_with_tables, tables = extract_tables(raw)
+        if tables:
+            # táblák JSONL – globális gyűjtő
+            for t in tables:
+                tables_jsonl_buf.write(json.dumps({
+                    "run_id": rid,
+                    "page_id": page_id,
+                    "file_name": os.path.basename(fname),
+                    "page_title": title,
+                    "selected_section": selected,
+                    "selected_heading": selected_heading,
+                    "table": t
+                }, ensure_ascii=False) + "\n")
 
-        # JSONL / CSV írás
+        # JSONL rekord(ok)
         base_rec = {
             "run_id": rid,
-            "doc_id": f"{slugify(title)}_{(page_id or 'noid')}",
+            "doc_id": slugify(title) if not page_id else f"{slugify(title)}_{page_id[:8]}",
             "page_id": page_id,
             "file_name": os.path.basename(fname),
             "page_title": title,
@@ -667,37 +711,11 @@ def convert_zip_to_datasets(
             md_lines.append("\n".join(meta_lines))  # meta blokk
         if selected_heading:
             md_lines.append(f"## {selected_heading}")
-        if md_with_tables.strip():
-            md_lines.append(md_with_tables.strip())
+        if md_with_tables:
+            md_lines.append(md_with_tables)
+        clean_md_text = "\n\n".join([ln for ln in md_lines if ln]).strip()
 
-        md_content = "\n\n".join(md_lines).strip() + "\n"
-        md_zip.writestr(f"{md_name}", md_content.encode("utf-8"))
-
-        # Táblázatok összegyűjtése JSONL-be
-        for t_index, t in enumerate(tables, start=1):
-            tables_jsonl_buf.write(json.dumps({
-                "run_id": rid,
-                "doc_id": f"{slugify(title)}_{(page_id or 'noid')}",
-                "page_id": page_id,
-                "file_name": os.path.basename(fname),
-                "page_title": title,
-                "selected_section": selected,
-                "selected_heading": selected_heading,
-                "table_index": t_index,
-                "headers": t["headers"],
-                "rows": t["rows"],
-                # meta is hasznos lehet a táblákhoz is:
-                "meta": {
-                    "szakasz": base_rec["meta_szakasz"],
-                    "video_statusz": base_rec["meta_video_statusz"],
-                    "lecke_hossza": base_rec["meta_lecke_hossza"],
-                    "utolso_modositas": base_rec["meta_utolso_modositas"],
-                    "tipus": base_rec["meta_tipus"],
-                    "kurzus": base_rec["meta_kurzus"],
-                    "vimeo_link": base_rec["meta_vimeo_link"],
-                    "sorszam": base_rec["meta_sorszam"],
-                }
-            }, ensure_ascii=False) + "\n")
+        md_zip.writestr(md_name, clean_md_text.encode("utf-8"))
 
         ok += 1
         pct = ok / max(1, total)
@@ -707,23 +725,17 @@ def convert_zip_to_datasets(
     md_zip.close()
     clean_md_zip_bytes = md_zip_buf.getvalue()
 
-    jsonl_bytes = jsonl_buf.getvalue().encode("utf-8")
-    tables_jsonl_bytes = tables_jsonl_buf.getvalue().encode("utf-8")
+    jsonl_bytes = (jsonl_buf.getvalue()).encode("utf-8")
+    csv_bytes_bom = ("\ufeff" + csv_buf.getvalue()).encode("utf-8")     # BOM
+    rep_bytes_bom = ("\ufeff" + rep_buf.getvalue()).encode("utf-8")     # BOM
+    tables_jsonl_bytes = (tables_jsonl_buf.getvalue()).encode("utf-8")
 
-    csv_text = csv_buf.getvalue()
-    rep_text = rep_buf.getvalue()
+    return jsonl_bytes, csv_bytes_bom, rep_bytes_bom, clean_md_zip_bytes, tables_jsonl_bytes
 
-    # UTF-8 BOM a CSV-khez (Excel)
-    csv_bytes = ("\ufeff" + csv_text).encode("utf-8")
-    rep_bytes = ("\ufeff" + rep_text).encode("utf-8")
-
-    return jsonl_bytes, csv_bytes, rep_bytes, clean_md_zip_bytes, tables_jsonl_bytes
 
 # ────────────────────────────────────────────────────────────────────────────────
 # UI
 # ────────────────────────────────────────────────────────────────────────────────
-st.title("🧩 Notion Markdown → ChatGPT (JSONL/CSV/MD) konverter")
-st.caption("Duplikációk kizárása (Videó→Lecke), félkövér tisztítás, táblázatok gépi kivonata. Metaadatok megőrzése a tisztított MD-ben és Sorszám-előtag a fájlnevekben. UTF-8, CSV BOM.")
 
 with st.expander("Mi ez?"):
     st.markdown(
@@ -755,88 +767,90 @@ overlap_chars = st.sidebar.number_input("Chunk átfedés (karakter)", min_value=
 uploaded = st.file_uploader("Töltsd fel a Notion Markdown ZIP-et", type=["zip"])
 
 if uploaded is not None:
-    st.info("ZIP betöltve. Állítsd be a címkéket/paramétereket, majd indítsd a konvertálást.")
-    start = st.button("Konvertálás indítása", type="primary", use_container_width=True)
+    video_labels = [ln.strip() for ln in video_labels_str.splitlines() if ln.strip()]
+    lesson_labels = [ln.strip() for ln in lesson_labels_str.splitlines() if ln.strip()]
 
-    if start:
-        vlabels = [x.strip() for x in video_labels_str.splitlines() if x.strip()]
-        llabels = [x.strip() for x in lesson_labels_str.splitlines() if x.strip()]
-
-        t0 = time.time()
-        (jsonl_bytes, csv_bytes, rep_bytes,
-         md_zip_bytes, tables_jsonl_bytes) = convert_zip_to_datasets(
-            uploaded.read(), vlabels, llabels, do_chunk, int(target_chars), int(overlap_chars)
+    try:
+        b = uploaded.read()
+        jsonl_bytes, csv_bytes_bom, rep_bytes_bom, md_zip_bytes, tables_jsonl_bytes = convert_zip_to_datasets(
+            b, video_labels, lesson_labels, do_chunk, target_chars, overlap_chars
         )
+    except zipfile.BadZipFile:
+        st.error("Hibás ZIP fájl.")
+        st.stop()
+    except Exception as e:
+        st.error(f"Váratlan hiba: {e}")
+        st.stop()
 
-        rid = run_id()
-        elapsed = int(time.time() - t0)
-        st.success(f"Kész! ({elapsed} mp)")
+    rid = run_id()
 
-        # ── Elsődleges letöltés: Tisztított MD-k (AJÁNLOTT) ─────────────────────
-        st.markdown("### ⭐ Ajánlott letöltés")
-        st.caption("Ezt használd elsősorban: tisztított, meta-blokkal és Sorszám-előtaggal ellátott Markdown fájlok.")
+    st.success("Kész! Válaszd ki a letöltést.")
+
+    # Elsődleges letöltés: tisztított MD-k
+    st.download_button(
+        "⬇️ Tisztított MD-k (ZIP)",
+        data=md_zip_bytes,
+        file_name=f"clean_md_{rid}.zip",
+        mime="application/zip",
+        use_container_width=True
+    )
+
+    st.divider()
+
+    # ── Másodlagos / haladó formátumok: expanderben ─────────────────────────
+    with st.expander("Haladó letöltések (JSONL/CSV/riport/táblázatok/Minden egyben)", expanded=False):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.download_button(
+                "⬇️ JSONL (szöveg, RAG/finetune)",
+                data=jsonl_bytes,
+                file_name=f"output_{rid}.jsonl",
+                mime="application/json",
+                use_container_width=True
+            )
+        with c2:
+            st.download_button(
+                "⬇️ CSV (Excel-barát, BOM)",
+                data=csv_bytes_bom,
+                file_name=f"output_{rid}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        with c3:
+            st.download_button(
+                "⬇️ Riport CSV",
+                data=rep_bytes_bom,
+                file_name=f"report_{rid}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+
         st.download_button(
-            "⬇️ Tisztított MD-k (ZIP) – AJÁNLOTT",
-            data=md_zip_bytes,
-            file_name=f"clean_md_{rid}.zip",
-            mime="application/zip",
+            "⬇️ Táblázatok (JSONL)",
+            data=tables_jsonl_bytes,
+            file_name=f"tables_{rid}.jsonl",
+            mime="application/json",
             use_container_width=True
         )
 
-        st.divider()
+        # MINDEN EGYBEN ZIP
+        with io.BytesIO() as all_buf:
+            with zipfile.ZipFile(all_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr(f"output_{rid}.jsonl", jsonl_bytes)
+                zf.writestr(f"output_{rid}.csv", csv_bytes_bom)
+                zf.writestr(f"report_{rid}.csv", rep_bytes_bom)
+                zf.writestr(f"tables_{rid}.jsonl", tables_jsonl_bytes)
+                # a tisztított MD ZIP tartalmát al-mappaként bepakoljuk
+                with zipfile.ZipFile(io.BytesIO(md_zip_bytes), "r") as mdzf:
+                    for info in mdzf.infolist():
+                        data = mdzf.read(info.filename)
+                        zf.writestr(f"clean_md/{info.filename}", data)
+            all_buf.seek(0)
 
-        # ── Másodlagos / haladó formátumok: expanderben ─────────────────────────
-        with st.expander("Haladó letöltések (JSONL/CSV/riport/táblázatok/Minden egyben)", expanded=False):
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.download_button(
-                    "⬇️ JSONL (szöveg, RAG/finetune)",
-                    data=jsonl_bytes,
-                    file_name=f"output_{rid}.jsonl",
-                    mime="application/json",
-                    use_container_width=True
-                )
-                st.download_button(
-                    "⬇️ Riport CSV",
-                    data=rep_bytes,
-                    file_name=f"report_{rid}.csv",
-                    mime="text/csv; charset=utf-8",
-                    use_container_width=True
-                )
-            with c2:
-                st.download_button(
-                    "⬇️ CSV (szöveg + meta)",
-                    data=csv_bytes,
-                    file_name=f"output_{rid}.csv",
-                    mime="text/csv; charset=utf-8",
-                    use_container_width=True
-                )
-                st.download_button(
-                    "⬇️ Táblázatok (JSONL)",
-                    data=tables_jsonl_bytes,
-                    file_name=f"tables_{rid}.jsonl",
-                    mime="application/json",
-                    use_container_width=True
-                )
-            with c3:
-                # Minden egyben ZIP
-                all_buf = io.BytesIO()
-                with zipfile.ZipFile(all_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                    zf.writestr("output.jsonl", jsonl_bytes)
-                    zf.writestr("output.csv", csv_bytes)         # BOM-os
-                    zf.writestr("report.csv", rep_bytes)         # BOM-os
-                    zf.writestr("tables.jsonl", tables_jsonl_bytes)
-                    # a tisztított MD ZIP tartalmát al-mappaként bepakoljuk
-                    with zipfile.ZipFile(io.BytesIO(md_zip_bytes), "r") as mdzf:
-                        for info in mdzf.infolist():
-                            data = mdzf.read(info.filename)
-                            zf.writestr(f"clean_md/{info.filename}", data)
-                all_buf.seek(0)
-
-                st.download_button(
-                    "⬇️ Minden egyben (ZIP)",
-                    data=all_buf.getvalue(),
-                    file_name=f"converted_{rid}.zip",
-                    mime="application/zip",
-                    use_container_width=True
-                )
+            st.download_button(
+                "⬇️ Minden egyben (ZIP)",
+                data=all_buf.getvalue(),
+                file_name=f"converted_{rid}.zip",
+                mime="application/zip",
+                use_container_width=True
+            )
