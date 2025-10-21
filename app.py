@@ -143,12 +143,11 @@ def split_markdown_sections(md: str) -> List[Tuple[int, str, List[str]]]:
 # Cél címkék (konfigurálható a UI-ban)
 # ────────────────────────────────────────────────────────────────────────────────
 DEFAULT_VIDEO_LABELS = [
-    "videó szöveg", "video szoveg", "videó leirat", "video leirat",
-    "transcript", "videó", "video",
+    "videó szöveg",
 ]
 
 DEFAULT_LESSON_LABELS = [
-    "lecke szöveg", "lecke anyag", "leckeszöveg", "tananyag",
+    "lecke szöveg"
 ]
 
 def label_match(title: str, target_tokens: List[str]) -> bool:
