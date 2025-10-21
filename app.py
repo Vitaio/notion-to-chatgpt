@@ -22,7 +22,7 @@ st.set_page_config(
 )
 
 st.title("📦 Notion → Markdown/JSONL/CSV konverter")
-st.caption("Notion Markdown exportból kinyeri a **Videó/Lecke** szöveget, tisztít, chunkol (opcionális), és táblázat-kivonatot készít.")
+st.caption("Notion Markdown exportból kinyeri a **Videó/Lecke** szöveget (PONTOS H2 egyezéssel), tisztít, chunkol (opcionális), és táblázat-kivonatot készít.")
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Kis segédek
@@ -140,27 +140,39 @@ def split_markdown_sections(md: str) -> List[Tuple[int, str, List[str]]]:
     return sections
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Cél címkék (konfigurálható a UI-ban)
+# PONTOS H2-egyezéshez szükséges konstansok/függvények
 # ────────────────────────────────────────────────────────────────────────────────
-DEFAULT_VIDEO_LABELS = [
-    "videó szöveg",
-]
 
-DEFAULT_LESSON_LABELS = [
-    "lecke szöveg"
-]
+EXACT_VIDEO_HEADING = "Videó szöveg"
+EXACT_LESSON_HEADING = "Lecke szöveg"
+_H2_ANY = re.compile(r"^##\s+.+$", flags=re.MULTILINE)
 
-def label_match(title: str, target_tokens: List[str]) -> bool:
-    """Fuzzy/normalizált egyezés (ékezet, írásjelek elhagyása; token-alapú részleges match)."""
-    tnorm = normalize(title)
-    for raw in target_tokens:
-        cand = normalize(raw)
-        subtoks = cand.split()
-        ok = all(tok in tnorm for tok in subtoks if tok)
-        if ok:
-            return True
-    return False
+def _extract_section_exact_h2(md: str, heading: str) -> str:
+    """
+    Csak a PONTOSAN '## <heading>' címsor alatti tartalmat adja vissza a következő H2-ig.
+    Ha nincs ilyen címsor vagy nincs érdemi tartalom, üres stringet ad vissza.
+    """
+    md = md or ""
+    m = re.search(rf"^##\s*{re.escape(heading)}\s*$", md, flags=re.MULTILINE)
+    if not m:
+        return ""
+    start = m.end()
+    m2 = _H2_ANY.search(md, pos=start)
+    end = m2.start() if m2 else len(md)
+    return md[start:end].strip()
 
+def choose_section_exact(md: str) -> Tuple[str, str, str]:
+    """
+    Prioritás: Videó szöveg > Lecke szöveg; egyik sincs → none.
+    Vissza: (selected_section, raw_text, selected_heading)
+    """
+    video = _extract_section_exact_h2(md, EXACT_VIDEO_HEADING)
+    lesson = _extract_section_exact_h2(md, EXACT_LESSON_HEADING)
+    if video:
+        return "video", video, EXACT_VIDEO_HEADING
+    if lesson:
+        return "lecke", lesson, EXACT_LESSON_HEADING
+    return "none", "", ""
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Markdown tisztítás
@@ -241,7 +253,7 @@ def renumber_ordered_lists(md: str) -> str:
             out.append(line)
         else:
             out.append(line)
-    return "\n".join(out).strip()
+    return "\n".Join(out).strip() if False else "\n".join(out).strip()  # védőhack: ne töröld a sort
 
 def strip_bold_emphasis(md: str) -> str:
     """
@@ -477,36 +489,6 @@ def meta_sorszam_as_int(meta: Dict[str, Optional[str]]) -> Optional[int]:
         return None
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Választás logika (Videó → Lecke → None)
-# ────────────────────────────────────────────────────────────────────────────────
-
-def choose_section(sections: List[Tuple[int, str, List[str]]], video_labels: List[str], lesson_labels: List[str]) -> Tuple[str, str, str]:
-    """
-    A címkék alapján kiválasztja a fő szöveget.
-    Elsőbbség: videó → lecke → none.
-    Vissza: (selected_section, raw_text, selected_heading)
-    """
-    video_txt = ""
-    lesson_txt = ""
-    video_heading = ""
-    lesson_heading = ""
-
-    for level, heading, lines in sections:
-        if 2 <= level <= 4:
-            if label_match(heading, video_labels):
-                video_txt = "\n".join(lines).strip()
-                video_heading = heading
-            if label_match(heading, lesson_labels):
-                lesson_txt = "\n".join(lines).strip()
-                lesson_heading = heading
-
-    if video_txt.strip():
-        return "video", video_txt, video_heading or "Videó szöveg"
-    if lesson_txt.strip():
-        return "lecke", lesson_txt, lesson_heading or "Lecke szöveg"
-    return "none", "", ""
-
-# ────────────────────────────────────────────────────────────────────────────────
 # Chunkolás (bekezdés-határok mentén)
 # ────────────────────────────────────────────────────────────────────────────────
 
@@ -570,8 +552,6 @@ def chunk_markdown(text: str, target_chars: int = 5500, overlap_chars: int = 400
 # ────────────────────────────────────────────────────────────────────────────────
 def convert_zip_to_datasets(
     zip_bytes: bytes,
-    video_labels: List[str],
-    lesson_labels: List[str],
     do_chunk: bool,
     target_chars: int,
     overlap_chars: int
@@ -622,23 +602,20 @@ def convert_zip_to_datasets(
         meta = parse_metadata_block(text)
         sorsz_int = meta_sorszam_as_int(meta)
 
-        # Szétbontás szekciókra és választás
-        sections = split_markdown_sections(text)
-        video_txt = ""; lesson_txt = ""
-        for level, heading, lines in sections:
-            if 2 <= level <= 4:
-                if label_match(heading, video_labels):  video_txt = "\n".join(lines).strip()
-                if label_match(heading, lesson_labels): lesson_txt = "\n".join(lines).strip()
+        # PONTOS H2 egyezés (csak a két fix cím engedélyezett)
+        video_txt  = _extract_section_exact_h2(text, EXACT_VIDEO_HEADING)
+        lesson_txt = _extract_section_exact_h2(text, EXACT_LESSON_HEADING)
 
-        selected, raw, selected_heading = choose_section(sections, video_labels, lesson_labels)
+        # Kiválasztás prioritással
+        selected, raw, selected_heading = choose_section_exact(text)
 
         # tisztítás
-        raw = strip_bold_emphasis(raw)
-        raw = clean_markdown(raw)
-        raw = renumber_ordered_lists(raw)
+        raw_clean = strip_bold_emphasis(raw)
+        raw_clean = clean_markdown(raw_clean)
+        raw_clean = renumber_ordered_lists(raw_clean)
 
         # táblázatok kivonata csak a kiválasztott szövegből
-        md_with_tables, tables = extract_tables(raw)
+        md_with_tables, tables = extract_tables(raw_clean if raw_clean else "")
         if tables:
             # táblák JSONL – globális gyűjtő
             for t in tables:
@@ -740,14 +717,16 @@ def convert_zip_to_datasets(
             md_lines.append("\n".join(meta_lines))  # meta blokk
         if selected_heading:
             md_lines.append(f"## {selected_heading}")
-        if md_with_tables:
+        if md_with_tables.strip():
             md_lines.append(md_with_tables)
+        else:
+            md_lines.append("Ehhez a leckéhez nem készült leírás.")
         clean_md_text = "\n\n".join([ln for ln in md_lines if ln]).strip()
 
         md_zip.writestr(md_name, clean_md_text.encode("utf-8"))
 
         ok += 1
-        pct = idx / max(1, total)  # ← valós feldolgozási előrehaladás
+        pct = idx / max(1, total)
         progress.progress(pct, text=f"{idx}/{total} feldolgozva (✅: {ok}, kihagyva: {skipped})")
 
     # Zárások és kimenetek előállítása
@@ -769,26 +748,17 @@ def convert_zip_to_datasets(
 with st.expander("Mi ez?"):
     st.markdown(
         "- Tölts fel egy **Notion export ZIP**-et (Markdown & CSV exportból a ZIP-et használd).\n"
-        "- A konverter a **„Videó szövege”** (vagy rokon címke) tartalmat vágja ki; ha üres, akkor a **„Lecke szövege”**-t.\n"
+        "- A konverter **PONTOS egyezéssel** csak a `## Videó szöveg` vagy, ha az üres/hiányzik, a `## Lecke szöveg` szakaszt veszi ki.\n"
+        "- Ha egyik sincs, a kimenet: _Ehhez a leckéhez nem készült leírás._\n"
         "- A félkövér (**…**) jelölést eltávolítja (kódblokkok érintetlenek).\n"
         "- A táblázatokat (GFM) felismeri és **JSON kivonatot** készít róluk.\n"
         "- **Metaadatok megőrzése**: a *Szakasz, Videó státusz, Lecke hossza, Utolsó módosítás, Típus, Kurzus, Vimeo link* sorok a H1 után bekerülnek a tisztított MD-be.\n"
-        "- A tisztított MD fájl **fájlnévének elejére** kerül a **Sorszám** (pl. `20-Cím.md`).\n"
+        "- A tisztított MD fájlnév sémája: `Kurzus - Sorszám - Név.md`.\n"
         "- Kimenet: **tisztított MD-k (ajánlott)** + haladó formátumok: JSONL, CSV, riport CSV, táblázatok JSONL.\n"
         "- Opcionális: **chunkolás** átfedéssel (JSONL-hoz)."
     )
 
 st.sidebar.header("Beállítások")
-video_labels_str = st.sidebar.text_area(
-    "Videó címkék (soronként)",
-    value="\n".join(DEFAULT_VIDEO_LABELS),
-    height=140
-)
-lesson_labels_str = st.sidebar.text_area(
-    "Lecke címkék (soronként)",
-    value="\n".join(DEFAULT_LESSON_LABELS),
-    height=120
-)
 do_chunk = st.sidebar.checkbox("JSONL chunkolása", value=True)
 target_chars = st.sidebar.number_input("Chunk célszélesség (karakter)", min_value=1000, max_value=20000, value=5500, step=500)
 overlap_chars = st.sidebar.number_input("Chunk átfedés (karakter)", min_value=0, max_value=5000, value=400, step=50)
@@ -796,13 +766,10 @@ overlap_chars = st.sidebar.number_input("Chunk átfedés (karakter)", min_value=
 uploaded = st.file_uploader("Töltsd fel a Notion Markdown ZIP-et", type=["zip"])
 
 if uploaded is not None:
-    video_labels = [ln.strip() for ln in video_labels_str.splitlines() if ln.strip()]
-    lesson_labels = [ln.strip() for ln in lesson_labels_str.splitlines() if ln.strip()]
-
     try:
         b = uploaded.read()
         jsonl_bytes, csv_bytes_bom, rep_bytes_bom, md_zip_bytes, tables_jsonl_bytes = convert_zip_to_datasets(
-            b, video_labels, lesson_labels, do_chunk, target_chars, overlap_chars
+            b, do_chunk, target_chars, overlap_chars
         )
     except zipfile.BadZipFile:
         st.error("Hibás ZIP fájl.")
