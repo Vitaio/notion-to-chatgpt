@@ -254,6 +254,61 @@ def renumber_ordered_lists(md: str) -> str:
             out.append(line)
     return "\n".Join(out).strip() if False else "\n".join(out).strip()  # védőhack: ne töröld a sort
 
+
+def enhance_readability(md: str) -> str:
+    """
+    Egyszerűsített formázás a jobb áttekinthetőséghez:
+    - egységes "- " jelölés a felsorolásoknál,
+    - üres sor beillesztése listák és címsorok elé,
+    - a címsorok után egy üres sort hagy, hogy elkülönüljenek.
+    """
+    if not md:
+        return ""
+
+    lines = md.splitlines()
+    out: List[str] = []
+
+    ul_re = re.compile(r"^(\s*)[-*+]\s+(.*)$")
+    ol_re = re.compile(r"^(\s*)\d+\.\s+(.*)$")
+
+    for i, line in enumerate(lines):
+        heading = HEADING_RE.match(line)
+        ul = ul_re.match(line)
+        ol = ol_re.match(line)
+
+        if heading:
+            if out and out[-1] != "":
+                out.append("")
+            out.append(line.rstrip())
+            out.append("")
+            continue
+
+        if ul:
+            indent, rest = ul.groups()
+            if out and out[-1] != "":
+                out.append("")
+            out.append(f"{indent}- {rest.strip()}")
+            continue
+
+        if ol:
+            indent, rest = ol.groups()
+            if out and out[-1] != "":
+                out.append("")
+            out.append(f"{indent}1. {rest.strip()}")
+            continue
+
+        if line.strip() == "":
+            if out and out[-1] == "":
+                continue
+            out.append("")
+        else:
+            out.append(line.rstrip())
+
+    while out and out[-1] == "":
+        out.pop()
+
+    return "\n".join(out)
+
 def strip_bold_emphasis(md: str) -> str:
     """
     Eltávolítja a **…** és __…__ kiemelést kódblokkokon kívül,
@@ -610,6 +665,7 @@ def convert_zip_to_datasets(
         # tisztítás
         raw_clean = strip_bold_emphasis(raw)
         raw_clean = clean_markdown(raw_clean)
+        raw_clean = enhance_readability(raw_clean)
         raw_clean = renumber_ordered_lists(raw_clean)
 
         # táblázatok kivonata csak a kiválasztott szövegből
