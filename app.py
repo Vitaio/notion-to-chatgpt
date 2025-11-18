@@ -23,8 +23,7 @@ st.set_page_config(
 
 st.title("📦 Notion → Markdown/JSONL/CSV konverter")
 st.caption(
-    "Notion Markdown exportból kinyeri az összes **Videó szöveg** lenyíló blokk tartalmát,"
-    " látványosabb, átláthatóbb MD-t készít (címsorok/listák rendezése), opcionálisan chunkol,"
+    "Notion Markdown exportból kinyeri a **Videó szöveg** lenyíló blokk tartalmát, tisztít, chunkol (opcionális),"
     " és táblázat-kivonatot készít."
 )
 
@@ -155,15 +154,14 @@ _VIDEO_TOGGLE_RE = re.compile(
 
 def _extract_video_toggle(md: str) -> str:
     """
-    Kizárólag a 'Videó szöveg' feliratú lenyíló (toggle) blokk(ok) tartalmát adja vissza.
-    Ha több ilyen blokk van, mindet sorban összefűzi (kettős sortöréssel).
+    Kizárólag a 'Videó szöveg' feliratú lenyíló (toggle) blokk tartalmát adja vissza.
     Ha nincs ilyen blokk vagy üres, üres stringet ad vissza.
     """
     md = md or ""
-    parts = [m.strip() for m in _VIDEO_TOGGLE_RE.findall(md) if m and m.strip()]
-    if not parts:
+    m = _VIDEO_TOGGLE_RE.search(md)
+    if not m:
         return ""
-    return "\n\n".join(parts)
+    return m.group(1).strip()
 
 def choose_section_exact(md: str) -> Tuple[str, str, str]:
     """
@@ -804,9 +802,9 @@ def convert_zip_to_datasets(
 with st.expander("Mi ez?"):
     st.markdown(
         "- Tölts fel egy **Notion export ZIP**-et (Markdown & CSV exportból a ZIP-et használd).\n"
-        "- A konverter az összes `Videó szöveg` lenyíló (toggle) blokk teljes tartalmát veszi ki.\n"
+        "- A konverter kizárólag a `Videó szöveg` lenyíló (toggle) blokk teljes tartalmát veszi ki.\n"
         "- Ha nincs ilyen lenyíló blokk, a kimenet: _Ehhez a leckéhez nem készült leírás._\n"
-        "- A félkövér (**…**) jelölést eltávolítja (kódblokkok érintetlenek), a címsorokat és listákat jobban tagolja az olvashatóságért.\n"
+        "- A félkövér (**…**) jelölést eltávolítja (kódblokkok érintetlenek).\n"
         "- A táblázatokat (GFM) felismeri és **JSON kivonatot** készít róluk.\n"
         "- **Metaadatok megőrzése**: a *Szakasz, Videó státusz, Lecke hossza, Utolsó módosítás, Típus, Kurzus, Vimeo link* sorok a H1 után bekerülnek a tisztított MD-be.\n"
         "- A tisztított MD fájlnév sémája: `Kurzus - Sorszám - Név.md`.\n"
