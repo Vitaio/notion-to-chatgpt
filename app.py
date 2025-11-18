@@ -4,6 +4,7 @@ import re
 import csv
 import json
 import time
+import html
 import zipfile
 import unicodedata
 from datetime import datetime
