@@ -219,7 +219,7 @@ def _extract_video_toggle(md: str) -> str:
             continue
 
         summary_text = _html_to_markdownish(summary_match.group(1))
-        if normalize(summary_text) != normalize(EXACT_VIDEO_HEADING):
+        if normalize(EXACT_VIDEO_HEADING) not in normalize(summary_text):
             continue
 
         content_html = block[summary_match.end():]
@@ -231,6 +231,32 @@ def _extract_video_toggle(md: str) -> str:
 
         if content_md:
             parts.append(content_md)
+
+    # fallback: ha nincs klasszikus <details>, keressünk önmagában álló <summary> blokkokat
+    for summary_match in _SUMMARY_RE.finditer(normalized_md):
+        summary_text = _html_to_markdownish(summary_match.group(1))
+        if normalize(EXACT_VIDEO_HEADING) not in normalize(summary_text):
+            continue
+        rest = normalized_md[summary_match.end():]
+        end_match = re.search(r"</details\s*>", rest, flags=re.IGNORECASE)
+        content_html = rest[: end_match.start()] if end_match else rest
+        content_md = _html_to_markdownish(content_html)
+        if not content_md:
+            content_md = html.unescape(re.sub(r"<[^>]+>", "", content_html)).strip()
+        if content_md:
+            parts.append(content_md)
+
+    # fallback 2: ha HTML summary sincs, próbáljuk H2 címsorral határolt blokkot kivenni
+    if not parts:
+        sections = split_markdown_sections(normalized_md)
+        for level, heading, lines in sections:
+            if level <= 0:
+                continue
+            if normalize(EXACT_VIDEO_HEADING) not in normalize(heading):
+                continue
+            content_md = "\n".join(lines).strip()
+            if content_md:
+                parts.append(content_md)
 
     if not parts:
         return ""
