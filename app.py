@@ -24,8 +24,7 @@ st.set_page_config(
 
 st.title("📦 Notion → Markdown/JSONL/CSV konverter")
 st.caption(
-    "Notion Markdown exportból kinyeri az összes **Videó szöveg** lenyíló blokk tartalmát,"
-    " látványosabb, átláthatóbb MD-t készít (címsorok/listák rendezése), opcionálisan chunkol,"
+    "Notion Markdown exportból kinyeri a **Videó szöveg** lenyíló blokk tartalmát, tisztít, chunkol (opcionális),"
     " és táblázat-kivonatot készít."
 )
 
@@ -149,71 +148,21 @@ def split_markdown_sections(md: str) -> List[Tuple[int, str, List[str]]]:
 # ────────────────────────────────────────────────────────────────────────────────
 
 EXACT_VIDEO_HEADING = "Videó szöveg"
-_DETAILS_RE = re.compile(r"<details[^>]*>(.*?)</details>", flags=re.DOTALL | re.IGNORECASE)
-_SUMMARY_RE = re.compile(r"<summary[^>]*>(.*?)</summary>", flags=re.DOTALL | re.IGNORECASE)
-
-
-def _html_to_markdownish(fragment: str) -> str:
-    """
-    Egyszerű HTML→Markdown-szerű átalakítás a toggle-blokkokhoz, hogy a sortörések,
-    címsorok és listák olvashatóbbak legyenek.
-    """
-    if not fragment:
-        return ""
-
-    txt = fragment
-    replacements = [
-        (r"<br\s*/?>", "\n"),
-        (r"</p\s*>", "\n\n"),
-        (r"<p[^>]*>", ""),
-        (r"</li\s*>", "\n"),
-        (r"<li[^>]*>", "- "),
-        (r"</(ul|ol)\s*>", "\n"),
-        (r"<(ul|ol)[^>]*>", ""),
-    ]
-    for pat, repl in replacements:
-        txt = re.sub(pat, repl, txt, flags=re.IGNORECASE)
-
-    # minden más HTML tag eltávolítása, entitások feloldása
-    txt = re.sub(r"<[^>]+>", "", txt)
-    txt = html.unescape(txt)
-
-    lines = [ln.rstrip() for ln in txt.splitlines()]
-    while lines and not lines[0].strip():
-        lines.pop(0)
-    while lines and not lines[-1].strip():
-        lines.pop()
-    return "\n".join(lines).strip()
+_VIDEO_TOGGLE_RE = re.compile(
+    r"<details>\s*<summary>\s*Videó szöveg\s*</summary>\s*(.*?)\s*</details>",
+    flags=re.DOTALL | re.IGNORECASE,
+)
 
 def _extract_video_toggle(md: str) -> str:
     """
-    Kizárólag a 'Videó szöveg' feliratú lenyíló (toggle) blokk(ok) tartalmát adja vissza.
-    - a <details ...> tag bármely attribútumával egyezik
-    - a summary HTML-je normalizálva hasonlít, így a díszítő tagek sem zavarják
-    - a tartalom HTML-ből Markdown-szerűre konvertálva kerül vissza,
-      hogy a címsorok, felsorolások, sortörések megmaradjanak
+    Kizárólag a 'Videó szöveg' feliratú lenyíló (toggle) blokk tartalmát adja vissza.
+    Ha nincs ilyen blokk vagy üres, üres stringet ad vissza.
     """
     md = md or ""
-    parts = []
-
-    for details_match in _DETAILS_RE.finditer(md):
-        block = details_match.group(1)
-        summary_match = _SUMMARY_RE.search(block)
-        if not summary_match:
-            continue
-
-        summary_text = _html_to_markdownish(summary_match.group(1))
-        if normalize(summary_text) != normalize(EXACT_VIDEO_HEADING):
-            continue
-
-        content_html = block[summary_match.end():]
-        content_md = _html_to_markdownish(content_html)
-        if content_md:
-            parts.append(content_md)
-
-    if not parts:
+    m = _VIDEO_TOGGLE_RE.search(md)
+    if not m:
         return ""
-    return "\n\n".join(parts)
+    return m.group(1).strip()
 
 def choose_section_exact(md: str) -> Tuple[str, str, str]:
     """
@@ -854,9 +803,9 @@ def convert_zip_to_datasets(
 with st.expander("Mi ez?"):
     st.markdown(
         "- Tölts fel egy **Notion export ZIP**-et (Markdown & CSV exportból a ZIP-et használd).\n"
-        "- A konverter az összes `Videó szöveg` lenyíló (toggle) blokk teljes tartalmát veszi ki.\n"
+        "- A konverter kizárólag a `Videó szöveg` lenyíló (toggle) blokk teljes tartalmát veszi ki.\n"
         "- Ha nincs ilyen lenyíló blokk, a kimenet: _Ehhez a leckéhez nem készült leírás._\n"
-        "- A félkövér (**…**) jelölést eltávolítja (kódblokkok érintetlenek), a címsorokat és listákat jobban tagolja az olvashatóságért.\n"
+        "- A félkövér (**…**) jelölést eltávolítja (kódblokkok érintetlenek).\n"
         "- A táblázatokat (GFM) felismeri és **JSON kivonatot** készít róluk.\n"
         "- **Metaadatok megőrzése**: a *Szakasz, Videó státusz, Lecke hossza, Utolsó módosítás, Típus, Kurzus, Vimeo link* sorok a H1 után bekerülnek a tisztított MD-be.\n"
         "- A tisztított MD fájlnév sémája: `Kurzus - Sorszám - Név.md`.\n"
