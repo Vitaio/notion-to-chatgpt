@@ -22,7 +22,10 @@ st.set_page_config(
 )
 
 st.title("📦 Notion → Markdown/JSONL/CSV konverter")
-st.caption("Notion Markdown exportból kinyeri a **Videó/Lecke** szöveget (PONTOS H2 egyezéssel), tisztít, chunkol (opcionális), és táblázat-kivonatot készít.")
+st.caption(
+    "Notion Markdown exportból kinyeri a **Videó szöveg** lenyíló blokk tartalmát, tisztít, chunkol (opcionális),"
+    " és táblázat-kivonatot készít."
+)
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Kis segédek
@@ -144,34 +147,30 @@ def split_markdown_sections(md: str) -> List[Tuple[int, str, List[str]]]:
 # ────────────────────────────────────────────────────────────────────────────────
 
 EXACT_VIDEO_HEADING = "Videó szöveg"
-EXACT_LESSON_HEADING = "Lecke szöveg"
-_H2_ANY = re.compile(r"^##\s+.+$", flags=re.MULTILINE)
+_VIDEO_TOGGLE_RE = re.compile(
+    r"<details>\s*<summary>\s*Videó szöveg\s*</summary>\s*(.*?)\s*</details>",
+    flags=re.DOTALL | re.IGNORECASE,
+)
 
-def _extract_section_exact_h2(md: str, heading: str) -> str:
+def _extract_video_toggle(md: str) -> str:
     """
-    Csak a PONTOSAN '## <heading>' címsor alatti tartalmat adja vissza a következő H2-ig.
-    Ha nincs ilyen címsor vagy nincs érdemi tartalom, üres stringet ad vissza.
+    Kizárólag a 'Videó szöveg' feliratú lenyíló (toggle) blokk tartalmát adja vissza.
+    Ha nincs ilyen blokk vagy üres, üres stringet ad vissza.
     """
     md = md or ""
-    m = re.search(rf"^##\s*{re.escape(heading)}\s*$", md, flags=re.MULTILINE)
+    m = _VIDEO_TOGGLE_RE.search(md)
     if not m:
         return ""
-    start = m.end()
-    m2 = _H2_ANY.search(md, pos=start)
-    end = m2.start() if m2 else len(md)
-    return md[start:end].strip()
+    return m.group(1).strip()
 
 def choose_section_exact(md: str) -> Tuple[str, str, str]:
     """
-    Prioritás: Videó szöveg > Lecke szöveg; egyik sincs → none.
+    Csak a 'Videó szöveg' lenyíló blokk tartalmát választja ki.
     Vissza: (selected_section, raw_text, selected_heading)
     """
-    video = _extract_section_exact_h2(md, EXACT_VIDEO_HEADING)
-    lesson = _extract_section_exact_h2(md, EXACT_LESSON_HEADING)
+    video = _extract_video_toggle(md)
     if video:
         return "video", video, EXACT_VIDEO_HEADING
-    if lesson:
-        return "lecke", lesson, EXACT_LESSON_HEADING
     return "none", "", ""
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -602,11 +601,10 @@ def convert_zip_to_datasets(
         meta = parse_metadata_block(text)
         sorsz_int = meta_sorszam_as_int(meta)
 
-        # PONTOS H2 egyezés (csak a két fix cím engedélyezett)
-        video_txt  = _extract_section_exact_h2(text, EXACT_VIDEO_HEADING)
-        lesson_txt = _extract_section_exact_h2(text, EXACT_LESSON_HEADING)
+        # Lenyíló (toggle) Videó szöveg blokk kinyerése
+        video_txt = _extract_video_toggle(text)
 
-        # Kiválasztás prioritással
+        # Kiválasztás: csak a lenyíló Videó szöveg tartalma számít
         selected, raw, selected_heading = choose_section_exact(text)
 
         # tisztítás
@@ -685,7 +683,7 @@ def convert_zip_to_datasets(
             page_id,
             title,
             len(video_txt),
-            len(lesson_txt),
+            0,
             selected,
             len(md_with_tables)
         ])
@@ -748,8 +746,8 @@ def convert_zip_to_datasets(
 with st.expander("Mi ez?"):
     st.markdown(
         "- Tölts fel egy **Notion export ZIP**-et (Markdown & CSV exportból a ZIP-et használd).\n"
-        "- A konverter **PONTOS egyezéssel** csak a `## Videó szöveg` vagy, ha az üres/hiányzik, a `## Lecke szöveg` szakaszt veszi ki.\n"
-        "- Ha egyik sincs, a kimenet: _Ehhez a leckéhez nem készült leírás._\n"
+        "- A konverter kizárólag a `Videó szöveg` lenyíló (toggle) blokk teljes tartalmát veszi ki.\n"
+        "- Ha nincs ilyen lenyíló blokk, a kimenet: _Ehhez a leckéhez nem készült leírás._\n"
         "- A félkövér (**…**) jelölést eltávolítja (kódblokkok érintetlenek).\n"
         "- A táblázatokat (GFM) felismeri és **JSON kivonatot** készít róluk.\n"
         "- **Metaadatok megőrzése**: a *Szakasz, Videó státusz, Lecke hossza, Utolsó módosítás, Típus, Kurzus, Vimeo link* sorok a H1 után bekerülnek a tisztított MD-be.\n"
