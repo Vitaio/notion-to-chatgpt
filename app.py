@@ -22,7 +22,11 @@ st.set_page_config(
 )
 
 st.title("📦 Notion → Markdown/JSONL/CSV konverter")
-st.caption("Notion Markdown exportból kinyeri a **Videó/Lecke** szöveget (PONTOS H2 egyezéssel), tisztít, chunkol (opcionális), és táblázat-kivonatot készít.")
+st.caption(
+    "Notion Markdown exportból kinyeri az összes **Videó szöveg** lenyíló blokk tartalmát,"
+    " látványosabb, átláthatóbb MD-t készít (címsorok/listák rendezése), opcionálisan chunkol,"
+    " és táblázat-kivonatot készít."
+)
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Kis segédek
@@ -144,34 +148,31 @@ def split_markdown_sections(md: str) -> List[Tuple[int, str, List[str]]]:
 # ────────────────────────────────────────────────────────────────────────────────
 
 EXACT_VIDEO_HEADING = "Videó szöveg"
-EXACT_LESSON_HEADING = "Lecke szöveg"
-_H2_ANY = re.compile(r"^##\s+.+$", flags=re.MULTILINE)
+_VIDEO_TOGGLE_RE = re.compile(
+    r"<details>\s*<summary>\s*Videó szöveg\s*</summary>\s*(.*?)\s*</details>",
+    flags=re.DOTALL | re.IGNORECASE,
+)
 
-def _extract_section_exact_h2(md: str, heading: str) -> str:
+def _extract_video_toggle(md: str) -> str:
     """
-    Csak a PONTOSAN '## <heading>' címsor alatti tartalmat adja vissza a következő H2-ig.
-    Ha nincs ilyen címsor vagy nincs érdemi tartalom, üres stringet ad vissza.
+    Kizárólag a 'Videó szöveg' feliratú lenyíló (toggle) blokk(ok) tartalmát adja vissza.
+    Ha több ilyen blokk van, mindet sorban összefűzi (kettős sortöréssel).
+    Ha nincs ilyen blokk vagy üres, üres stringet ad vissza.
     """
     md = md or ""
-    m = re.search(rf"^##\s*{re.escape(heading)}\s*$", md, flags=re.MULTILINE)
-    if not m:
+    parts = [m.strip() for m in _VIDEO_TOGGLE_RE.findall(md) if m and m.strip()]
+    if not parts:
         return ""
-    start = m.end()
-    m2 = _H2_ANY.search(md, pos=start)
-    end = m2.start() if m2 else len(md)
-    return md[start:end].strip()
+    return "\n\n".join(parts)
 
 def choose_section_exact(md: str) -> Tuple[str, str, str]:
     """
-    Prioritás: Videó szöveg > Lecke szöveg; egyik sincs → none.
+    Csak a 'Videó szöveg' lenyíló blokk tartalmát választja ki.
     Vissza: (selected_section, raw_text, selected_heading)
     """
-    video = _extract_section_exact_h2(md, EXACT_VIDEO_HEADING)
-    lesson = _extract_section_exact_h2(md, EXACT_LESSON_HEADING)
+    video = _extract_video_toggle(md)
     if video:
         return "video", video, EXACT_VIDEO_HEADING
-    if lesson:
-        return "lecke", lesson, EXACT_LESSON_HEADING
     return "none", "", ""
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -254,6 +255,61 @@ def renumber_ordered_lists(md: str) -> str:
         else:
             out.append(line)
     return "\n".Join(out).strip() if False else "\n".join(out).strip()  # védőhack: ne töröld a sort
+
+
+def enhance_readability(md: str) -> str:
+    """
+    Egyszerűsített formázás a jobb áttekinthetőséghez:
+    - egységes "- " jelölés a felsorolásoknál,
+    - üres sor beillesztése listák és címsorok elé,
+    - a címsorok után egy üres sort hagy, hogy elkülönüljenek.
+    """
+    if not md:
+        return ""
+
+    lines = md.splitlines()
+    out: List[str] = []
+
+    ul_re = re.compile(r"^(\s*)[-*+]\s+(.*)$")
+    ol_re = re.compile(r"^(\s*)\d+\.\s+(.*)$")
+
+    for i, line in enumerate(lines):
+        heading = HEADING_RE.match(line)
+        ul = ul_re.match(line)
+        ol = ol_re.match(line)
+
+        if heading:
+            if out and out[-1] != "":
+                out.append("")
+            out.append(line.rstrip())
+            out.append("")
+            continue
+
+        if ul:
+            indent, rest = ul.groups()
+            if out and out[-1] != "":
+                out.append("")
+            out.append(f"{indent}- {rest.strip()}")
+            continue
+
+        if ol:
+            indent, rest = ol.groups()
+            if out and out[-1] != "":
+                out.append("")
+            out.append(f"{indent}1. {rest.strip()}")
+            continue
+
+        if line.strip() == "":
+            if out and out[-1] == "":
+                continue
+            out.append("")
+        else:
+            out.append(line.rstrip())
+
+    while out and out[-1] == "":
+        out.pop()
+
+    return "\n".join(out)
 
 def strip_bold_emphasis(md: str) -> str:
     """
@@ -602,16 +658,16 @@ def convert_zip_to_datasets(
         meta = parse_metadata_block(text)
         sorsz_int = meta_sorszam_as_int(meta)
 
-        # PONTOS H2 egyezés (csak a két fix cím engedélyezett)
-        video_txt  = _extract_section_exact_h2(text, EXACT_VIDEO_HEADING)
-        lesson_txt = _extract_section_exact_h2(text, EXACT_LESSON_HEADING)
+        # Lenyíló (toggle) Videó szöveg blokk kinyerése
+        video_txt = _extract_video_toggle(text)
 
-        # Kiválasztás prioritással
+        # Kiválasztás: csak a lenyíló Videó szöveg tartalma számít
         selected, raw, selected_heading = choose_section_exact(text)
 
         # tisztítás
         raw_clean = strip_bold_emphasis(raw)
         raw_clean = clean_markdown(raw_clean)
+        raw_clean = enhance_readability(raw_clean)
         raw_clean = renumber_ordered_lists(raw_clean)
 
         # táblázatok kivonata csak a kiválasztott szövegből
@@ -685,7 +741,7 @@ def convert_zip_to_datasets(
             page_id,
             title,
             len(video_txt),
-            len(lesson_txt),
+            0,
             selected,
             len(md_with_tables)
         ])
@@ -748,9 +804,9 @@ def convert_zip_to_datasets(
 with st.expander("Mi ez?"):
     st.markdown(
         "- Tölts fel egy **Notion export ZIP**-et (Markdown & CSV exportból a ZIP-et használd).\n"
-        "- A konverter **PONTOS egyezéssel** csak a `## Videó szöveg` vagy, ha az üres/hiányzik, a `## Lecke szöveg` szakaszt veszi ki.\n"
-        "- Ha egyik sincs, a kimenet: _Ehhez a leckéhez nem készült leírás._\n"
-        "- A félkövér (**…**) jelölést eltávolítja (kódblokkok érintetlenek).\n"
+        "- A konverter az összes `Videó szöveg` lenyíló (toggle) blokk teljes tartalmát veszi ki.\n"
+        "- Ha nincs ilyen lenyíló blokk, a kimenet: _Ehhez a leckéhez nem készült leírás._\n"
+        "- A félkövér (**…**) jelölést eltávolítja (kódblokkok érintetlenek), a címsorokat és listákat jobban tagolja az olvashatóságért.\n"
         "- A táblázatokat (GFM) felismeri és **JSON kivonatot** készít róluk.\n"
         "- **Metaadatok megőrzése**: a *Szakasz, Videó státusz, Lecke hossza, Utolsó módosítás, Típus, Kurzus, Vimeo link* sorok a H1 után bekerülnek a tisztított MD-be.\n"
         "- A tisztított MD fájlnév sémája: `Kurzus - Sorszám - Név.md`.\n"
