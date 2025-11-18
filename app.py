@@ -210,7 +210,12 @@ def _extract_video_toggle(md: str) -> str:
     # Ha a toggle blockquote-ban/behúzva áll, pucoljuk le a sor elejéről a díszítést
     normalized_md = "\n".join(line.lstrip(" >\t") for line in md.splitlines())
 
-    parts = []
+    parts: List[str] = []
+
+    def _append(content: str) -> None:
+        content = (content or "").strip()
+        if content and content not in parts:
+            parts.append(content)
 
     for details_match in _DETAILS_RE.finditer(normalized_md):
         block = details_match.group(1)
@@ -229,22 +234,21 @@ def _extract_video_toggle(md: str) -> str:
         if not content_md:
             content_md = html.unescape(re.sub(r"<[^>]+>", "", content_html)).strip()
 
-        if content_md:
-            parts.append(content_md)
+        _append(content_md)
 
     # fallback: ha nincs klasszikus <details>, keressünk önmagában álló <summary> blokkokat
-    for summary_match in _SUMMARY_RE.finditer(normalized_md):
-        summary_text = _html_to_markdownish(summary_match.group(1))
-        if normalize(EXACT_VIDEO_HEADING) not in normalize(summary_text):
-            continue
-        rest = normalized_md[summary_match.end():]
-        end_match = re.search(r"</details\s*>", rest, flags=re.IGNORECASE)
-        content_html = rest[: end_match.start()] if end_match else rest
-        content_md = _html_to_markdownish(content_html)
-        if not content_md:
-            content_md = html.unescape(re.sub(r"<[^>]+>", "", content_html)).strip()
-        if content_md:
-            parts.append(content_md)
+    if not parts:
+        for summary_match in _SUMMARY_RE.finditer(normalized_md):
+            summary_text = _html_to_markdownish(summary_match.group(1))
+            if normalize(EXACT_VIDEO_HEADING) not in normalize(summary_text):
+                continue
+            rest = normalized_md[summary_match.end():]
+            end_match = re.search(r"</details\s*>", rest, flags=re.IGNORECASE)
+            content_html = rest[: end_match.start()] if end_match else rest
+            content_md = _html_to_markdownish(content_html)
+            if not content_md:
+                content_md = html.unescape(re.sub(r"<[^>]+>", "", content_html)).strip()
+            _append(content_md)
 
     # fallback 2: ha HTML summary sincs, próbáljuk H2 címsorral határolt blokkot kivenni
     if not parts:
@@ -254,9 +258,22 @@ def _extract_video_toggle(md: str) -> str:
                 continue
             if normalize(EXACT_VIDEO_HEADING) not in normalize(heading):
                 continue
-            content_md = "\n".join(lines).strip()
-            if content_md:
-                parts.append(content_md)
+            _append("\n".join(lines))
+
+    # fallback 3: ha semmi sem egyezett, használjuk a 'Videó szöveg' feliratot tartalmazó sort és a következő blokkot
+    if not parts:
+        lines = normalized_md.splitlines()
+        for idx, line in enumerate(lines):
+            if normalize(EXACT_VIDEO_HEADING) not in normalize(line):
+                continue
+            block: List[str] = []
+            for ln in lines[idx + 1:]:
+                if HEADING_RE.match(ln):
+                    break
+                block.append(ln)
+            _append(_html_to_markdownish("\n".join(block)))
+            if parts:
+                break
 
     if not parts:
         return ""
