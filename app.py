@@ -149,12 +149,50 @@ def split_markdown_sections(md: str) -> List[Tuple[int, str, List[str]]]:
 # ────────────────────────────────────────────────────────────────────────────────
 
 EXACT_VIDEO_HEADING = "Videó szöveg"
-_DETAILS_RE = re.compile(
-    r"<details\b[^>]*>\s*(.*?)</details\s*>", flags=re.DOTALL | re.IGNORECASE
-)
+_DETAILS_OPEN_RE = re.compile(r"<details\b[^>]*>", flags=re.IGNORECASE)
 _SUMMARY_RE = re.compile(
     r"<summary\b[^>]*>\s*(.*?)</summary\s*>", flags=re.DOTALL | re.IGNORECASE
 )
+
+
+def _iter_details_blocks(html_text: str) -> List[Tuple[int, int, str]]:
+    """Return list of (start, end, inner_html) for every <details>...</details> block."""
+    if not html_text:
+        return []
+
+    matches = list(
+        re.finditer(r"<details\b[^>]*>|</details\s*>", html_text, flags=re.IGNORECASE)
+    )
+    stack: List[Tuple[int, int]] = []  # (start_idx, end_idx_of_open_tag)
+    blocks: List[Tuple[int, int, str]] = []
+
+    for token in matches:
+        token_text = token.group(0)
+        is_open = bool(_DETAILS_OPEN_RE.match(token_text))
+        if is_open:
+            stack.append((token.start(), token.end()))
+            continue
+        if not stack:
+            continue
+        start_idx, open_end = stack.pop()
+        inner_html = html_text[open_end : token.start()]
+        blocks.append((start_idx, token.end(), inner_html))
+
+    blocks.sort(key=lambda item: item[0])
+    return blocks
+
+
+def _promote_nested_summaries(html_fragment: str) -> str:
+    """Convert nested <summary> tags to markdown-like headings so titles stay visible."""
+
+    def _summary_repl(match: re.Match) -> str:
+        raw = match.group(1) or ""
+        text = html.unescape(re.sub(r"<[^>]+>", "", raw)).strip()
+        if not text:
+            return "\n\n"
+        return f"\n\n#### {text}\n\n"
+
+    return re.sub(r"<summary\b[^>]*>(.*?)</summary\s*>", _summary_repl, html_fragment, flags=re.IGNORECASE | re.DOTALL)
 
 
 def _html_to_markdownish(fragment: str) -> str:
@@ -180,6 +218,8 @@ def _html_to_markdownish(fragment: str) -> str:
         (r"<h4[^>]*>(.*?)</h4\s*>", r"#### \1\n\n"),
         (r"<h5[^>]*>(.*?)</h5\s*>", r"##### \1\n\n"),
         (r"<h6[^>]*>(.*?)</h6\s*>", r"###### \1\n\n"),
+        (r"<input[^>]+type=\"checkbox\"[^>]*checked[^>]*>", "[x] "),
+        (r"<input[^>]+type=\"checkbox\"[^>]*>", "[ ] "),
     ]
     for pat, repl in replacements:
         txt = re.sub(pat, repl, txt, flags=re.IGNORECASE)
@@ -217,8 +257,7 @@ def _extract_video_toggle(md: str) -> str:
         if content and content not in parts:
             parts.append(content)
 
-    for details_match in _DETAILS_RE.finditer(normalized_md):
-        block = details_match.group(1)
+    for _, _, block in _iter_details_blocks(normalized_md):
         summary_match = _SUMMARY_RE.search(block)
         if not summary_match:
             continue
@@ -228,6 +267,7 @@ def _extract_video_toggle(md: str) -> str:
             continue
 
         content_html = block[summary_match.end():]
+        content_html = _promote_nested_summaries(content_html)
         content_md = _html_to_markdownish(content_html)
 
         # ha a konverzió üres lenne (pl. csak tagek), essünk vissza a nyers, tag-mentesített tartalomra
