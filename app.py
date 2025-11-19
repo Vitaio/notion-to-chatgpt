@@ -149,10 +149,55 @@ def split_markdown_sections(md: str) -> List[Tuple[int, str, List[str]]]:
 # ────────────────────────────────────────────────────────────────────────────────
 
 EXACT_VIDEO_HEADING = "Videó szöveg"
+EXACT_LESSON_HEADING = "Lecke szöveg"
 _DETAILS_OPEN_RE = re.compile(r"<details\b[^>]*>", flags=re.IGNORECASE)
 _SUMMARY_RE = re.compile(
     r"<summary\b[^>]*>\s*(.*?)</summary\s*>", flags=re.DOTALL | re.IGNORECASE
 )
+
+
+def _extract_between_headings(
+    md: str,
+    start_heading: str,
+    end_heading: Optional[str] = None,
+    level: int = 2,
+    include_start_heading: bool = True,
+) -> str:
+    """Return the markdown that sits between two specific headings (inclusive of the start)."""
+    if not md:
+        return ""
+
+    norm_start = normalize(start_heading)
+    norm_end = normalize(end_heading) if end_heading else ""
+    capturing = False
+    buf: List[str] = []
+
+    for line in md.splitlines():
+        m = HEADING_RE.match(line)
+        if m:
+            lvl = len(m.group(1))
+            title = m.group(2).strip()
+            norm_title = normalize(title)
+            if lvl == level and norm_title == norm_start:
+                capturing = True
+                buf = []
+                if include_start_heading:
+                    buf.append(line.rstrip())
+                continue
+            if capturing and norm_end and lvl == level and norm_title == norm_end:
+                break
+        if capturing:
+            buf.append(line.rstrip())
+
+    if not buf:
+        return ""
+
+    # trim leading/trailing blank lines but keep actual content (including headings)
+    while buf and not buf[0].strip():
+        buf.pop(0)
+    while buf and not buf[-1].strip():
+        buf.pop()
+    return "\n".join(buf).strip()
 
 
 def _iter_details_blocks(html_text: str) -> List[Tuple[int, int, str]]:
@@ -246,6 +291,16 @@ def _extract_video_toggle(md: str) -> str:
     """
     if not md:
         return ""
+
+    heading_slice = _extract_between_headings(
+        md,
+        start_heading=EXACT_VIDEO_HEADING,
+        end_heading=EXACT_LESSON_HEADING,
+        level=2,
+        include_start_heading=True,
+    )
+    if heading_slice:
+        return heading_slice
 
     # Ha a toggle blockquote-ban/behúzva áll, pucoljuk le a sor elejéről a díszítést
     normalized_md = "\n".join(line.lstrip(" >\t") for line in md.splitlines())
