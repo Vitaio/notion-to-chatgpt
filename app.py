@@ -200,6 +200,22 @@ def _extract_between_headings(
     return "\n".join(buf).strip()
 
 
+def has_heading(md: str, heading: str, level: int = 2) -> bool:
+    """Check whether a specific heading exists in the markdown."""
+    if not md:
+        return False
+    normalized = normalize(heading)
+    for line in md.splitlines():
+        m = HEADING_RE.match(line)
+        if not m:
+            continue
+        if len(m.group(1)) != level:
+            continue
+        if normalize(m.group(2).strip()) == normalized:
+            return True
+    return False
+
+
 def _iter_details_blocks(html_text: str) -> List[Tuple[int, int, str]]:
     """Return list of (start, end, inner_html) for every <details>...</details> block."""
     if not html_text:
@@ -297,10 +313,22 @@ def _extract_video_toggle(md: str) -> str:
         start_heading=EXACT_VIDEO_HEADING,
         end_heading=EXACT_LESSON_HEADING,
         level=2,
-        include_start_heading=True,
-    )
+        include_start_heading=False,
+    ).strip()
     if heading_slice:
         return heading_slice
+
+    # Ha van Videó és Lecke heading, de köztük nincs tartalom, vegyük a Lecke blokkot.
+    if has_heading(md, EXACT_VIDEO_HEADING, level=2) and has_heading(md, EXACT_LESSON_HEADING, level=2):
+        lesson_slice = _extract_between_headings(
+            md,
+            start_heading=EXACT_LESSON_HEADING,
+            end_heading=None,
+            level=2,
+            include_start_heading=False,
+        ).strip()
+        if lesson_slice:
+            return lesson_slice
 
     # Ha a toggle blockquote-ban/behúzva áll, pucoljuk le a sor elejéről a díszítést
     normalized_md = "\n".join(line.lstrip(" >\t") for line in md.splitlines())
@@ -980,10 +1008,17 @@ def convert_zip_to_datasets(
             md_lines.append(f"# {title}")
         if meta_lines:
             md_lines.append("\n".join(meta_lines))  # meta blokk
+        section_body = md_with_tables.strip()
+        if selected_heading and section_body:
+            section_lines = section_body.splitlines()
+            if section_lines and section_lines[0].strip() == f"## {selected_heading}".strip():
+                section_body = "\n".join(section_lines[1:]).lstrip("\n")
+
         if selected_heading:
             md_lines.append(f"## {selected_heading}")
-        if md_with_tables.strip():
-            md_lines.append(md_with_tables)
+
+        if section_body:
+            md_lines.append(section_body)
         else:
             md_lines.append("Ehhez a leckéhez nem készült leírás.")
         clean_md_text = "\n\n".join([ln for ln in md_lines if ln]).strip()
