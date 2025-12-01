@@ -714,7 +714,8 @@ def extract_page_title(md: str, fallback: str) -> str:
 # Metaadat-parzolás (fejléc utáni kulcs: érték sorok)
 # ────────────────────────────────────────────────────────────────────────────────
 _META_ALIASES = {
-    "szakasz": ["szakasz", "section", "fejezet", "modul"],
+    "szakasz": ["szakasz", "section", "fejezet"],
+    "modul": ["modul"],
     "video_statusz": ["videó státusz", "video statusz", "videostatusz", "videó status", "videostatus", "státusz", "statusz", "státus", "status"],
     "lecke_hossza": ["lecke hossza", "lesson length", "hossz"],
     "utolso_modositas": ["utolsó módosítás", "utolso modositas", "last modified", "utolsó módosítás dátuma"],
