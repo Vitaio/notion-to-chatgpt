@@ -4,6 +4,7 @@ import re
 import csv
 import json
 import time
+import html
 import zipfile
 import unicodedata
 from datetime import datetime
@@ -22,7 +23,11 @@ st.set_page_config(
 )
 
 st.title("📦 Notion → Markdown/JSONL/CSV konverter")
-st.caption("Notion Markdown exportból kinyeri a **Videó/Lecke** szöveget (PONTOS H2 egyezéssel), tisztít, chunkol (opcionális), és táblázat-kivonatot készít.")
+st.caption(
+    "Notion Markdown exportból kinyeri az összes **Videó szöveg** lenyíló blokk tartalmát,"
+    " látványosabb, átláthatóbb MD-t készít (címsorok/listák rendezése), opcionálisan chunkol,"
+    " és táblázat-kivonatot készít."
+)
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Kis segédek
@@ -145,33 +150,266 @@ def split_markdown_sections(md: str) -> List[Tuple[int, str, List[str]]]:
 
 EXACT_VIDEO_HEADING = "Videó szöveg"
 EXACT_LESSON_HEADING = "Lecke szöveg"
-_H2_ANY = re.compile(r"^##\s+.+$", flags=re.MULTILINE)
+_DETAILS_OPEN_RE = re.compile(r"<details\b[^>]*>", flags=re.IGNORECASE)
+_SUMMARY_RE = re.compile(
+    r"<summary\b[^>]*>\s*(.*?)</summary\s*>", flags=re.DOTALL | re.IGNORECASE
+)
 
-def _extract_section_exact_h2(md: str, heading: str) -> str:
-    """
-    Csak a PONTOSAN '## <heading>' címsor alatti tartalmat adja vissza a következő H2-ig.
-    Ha nincs ilyen címsor vagy nincs érdemi tartalom, üres stringet ad vissza.
-    """
-    md = md or ""
-    m = re.search(rf"^##\s*{re.escape(heading)}\s*$", md, flags=re.MULTILINE)
-    if not m:
+
+def _extract_between_headings(
+    md: str,
+    start_heading: str,
+    end_heading: Optional[str] = None,
+    level: int = 2,
+    include_start_heading: bool = True,
+) -> str:
+    """Return the markdown that sits between two specific headings (inclusive of the start)."""
+    if not md:
         return ""
-    start = m.end()
-    m2 = _H2_ANY.search(md, pos=start)
-    end = m2.start() if m2 else len(md)
-    return md[start:end].strip()
+
+    norm_start = normalize(start_heading)
+    norm_end = normalize(end_heading) if end_heading else ""
+    capturing = False
+    buf: List[str] = []
+
+    for line in md.splitlines():
+        m = HEADING_RE.match(line)
+        if m:
+            lvl = len(m.group(1))
+            title = m.group(2).strip()
+            norm_title = normalize(title)
+            if lvl == level and norm_title == norm_start:
+                capturing = True
+                buf = []
+                if include_start_heading:
+                    buf.append(line.rstrip())
+                continue
+            if capturing and norm_end and lvl == level and norm_title == norm_end:
+                break
+        if capturing:
+            buf.append(line.rstrip())
+
+    if not buf:
+        return ""
+
+    # trim leading/trailing blank lines but keep actual content (including headings)
+    while buf and not buf[0].strip():
+        buf.pop(0)
+    while buf and not buf[-1].strip():
+        buf.pop()
+    return "\n".join(buf).strip()
+
+
+def has_heading(md: str, heading: str, level: int = 2) -> bool:
+    """Check whether a specific heading exists in the markdown."""
+    if not md:
+        return False
+    normalized = normalize(heading)
+    for line in md.splitlines():
+        m = HEADING_RE.match(line)
+        if not m:
+            continue
+        if len(m.group(1)) != level:
+            continue
+        if normalize(m.group(2).strip()) == normalized:
+            return True
+    return False
+
+
+def _iter_details_blocks(html_text: str) -> List[Tuple[int, int, str]]:
+    """Return list of (start, end, inner_html) for every <details>...</details> block."""
+    if not html_text:
+        return []
+
+    matches = list(
+        re.finditer(r"<details\b[^>]*>|</details\s*>", html_text, flags=re.IGNORECASE)
+    )
+    stack: List[Tuple[int, int]] = []  # (start_idx, end_idx_of_open_tag)
+    blocks: List[Tuple[int, int, str]] = []
+
+    for token in matches:
+        token_text = token.group(0)
+        is_open = bool(_DETAILS_OPEN_RE.match(token_text))
+        if is_open:
+            stack.append((token.start(), token.end()))
+            continue
+        if not stack:
+            continue
+        start_idx, open_end = stack.pop()
+        inner_html = html_text[open_end : token.start()]
+        blocks.append((start_idx, token.end(), inner_html))
+
+    blocks.sort(key=lambda item: item[0])
+    return blocks
+
+
+def _promote_nested_summaries(html_fragment: str) -> str:
+    """Convert nested <summary> tags to markdown-like headings so titles stay visible."""
+
+    def _summary_repl(match: re.Match) -> str:
+        raw = match.group(1) or ""
+        text = html.unescape(re.sub(r"<[^>]+>", "", raw)).strip()
+        if not text:
+            return "\n\n"
+        return f"\n\n#### {text}\n\n"
+
+    return re.sub(r"<summary\b[^>]*>(.*?)</summary\s*>", _summary_repl, html_fragment, flags=re.IGNORECASE | re.DOTALL)
+
+
+def _html_to_markdownish(fragment: str) -> str:
+    """
+    Egyszerű HTML→Markdown-szerű átalakítás a toggle-blokkokhoz, hogy a sortörések,
+    címsorok és listák olvashatóbbak legyenek.
+    """
+    if not fragment:
+        return ""
+
+    txt = fragment
+    replacements = [
+        (r"<br\s*/?>", "\n"),
+        (r"</p\s*>", "\n\n"),
+        (r"<p[^>]*>", ""),
+        (r"</li\s*>", "\n"),
+        (r"<li[^>]*>", "- "),
+        (r"</(ul|ol)\s*>", "\n"),
+        (r"<(ul|ol)[^>]*>", ""),
+        (r"<h1[^>]*>(.*?)</h1\s*>", r"# \1\n\n"),
+        (r"<h2[^>]*>(.*?)</h2\s*>", r"## \1\n\n"),
+        (r"<h3[^>]*>(.*?)</h3\s*>", r"### \1\n\n"),
+        (r"<h4[^>]*>(.*?)</h4\s*>", r"#### \1\n\n"),
+        (r"<h5[^>]*>(.*?)</h5\s*>", r"##### \1\n\n"),
+        (r"<h6[^>]*>(.*?)</h6\s*>", r"###### \1\n\n"),
+        (r"<input[^>]+type=\"checkbox\"[^>]*checked[^>]*>", "[x] "),
+        (r"<input[^>]+type=\"checkbox\"[^>]*>", "[ ] "),
+    ]
+    for pat, repl in replacements:
+        txt = re.sub(pat, repl, txt, flags=re.IGNORECASE)
+
+    # minden más HTML tag eltávolítása, entitások feloldása
+    txt = re.sub(r"<[^>]+>", "", txt)
+    txt = html.unescape(txt)
+
+    lines = [ln.rstrip() for ln in txt.splitlines()]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(lines).strip()
+
+def _extract_video_toggle(md: str) -> str:
+    """
+    Kizárólag a 'Videó szöveg' feliratú lenyíló (toggle) blokk(ok) tartalmát adja vissza.
+    - tolerálja a <details> és </summary> körüli whitespace-et
+    - a summary HTML-je normalizálva hasonlít, így a díszítő tagek sem zavarják
+    - blockquote / behúzott toggle is működik (a sor eleji '>' és whitespace lecsupaszításával)
+    - a tartalom HTML-ből Markdown-szerűre konvertálva kerül vissza,
+      hogy a címsorok, felsorolások, sortörések megmaradjanak
+    """
+    if not md:
+        return ""
+
+    heading_slice = _extract_between_headings(
+        md,
+        start_heading=EXACT_VIDEO_HEADING,
+        end_heading=EXACT_LESSON_HEADING,
+        level=2,
+        include_start_heading=False,
+    ).strip()
+    if heading_slice:
+        return heading_slice
+
+    # Ha van Videó és Lecke heading, de köztük nincs tartalom, vegyük a Lecke blokkot.
+    if has_heading(md, EXACT_VIDEO_HEADING, level=2) and has_heading(md, EXACT_LESSON_HEADING, level=2):
+        lesson_slice = _extract_between_headings(
+            md,
+            start_heading=EXACT_LESSON_HEADING,
+            end_heading=None,
+            level=2,
+            include_start_heading=False,
+        ).strip()
+        if lesson_slice:
+            return lesson_slice
+
+    # Ha a toggle blockquote-ban/behúzva áll, pucoljuk le a sor elejéről a díszítést
+    normalized_md = "\n".join(line.lstrip(" >\t") for line in md.splitlines())
+
+    parts: List[str] = []
+
+    def _append(content: str) -> None:
+        content = (content or "").strip()
+        if content and content not in parts:
+            parts.append(content)
+
+    for _, _, block in _iter_details_blocks(normalized_md):
+        summary_match = _SUMMARY_RE.search(block)
+        if not summary_match:
+            continue
+
+        summary_text = _html_to_markdownish(summary_match.group(1))
+        if normalize(EXACT_VIDEO_HEADING) not in normalize(summary_text):
+            continue
+
+        content_html = block[summary_match.end():]
+        content_html = _promote_nested_summaries(content_html)
+        content_md = _html_to_markdownish(content_html)
+
+        # ha a konverzió üres lenne (pl. csak tagek), essünk vissza a nyers, tag-mentesített tartalomra
+        if not content_md:
+            content_md = html.unescape(re.sub(r"<[^>]+>", "", content_html)).strip()
+
+        _append(content_md)
+
+    # fallback: ha nincs klasszikus <details>, keressünk önmagában álló <summary> blokkokat
+    if not parts:
+        for summary_match in _SUMMARY_RE.finditer(normalized_md):
+            summary_text = _html_to_markdownish(summary_match.group(1))
+            if normalize(EXACT_VIDEO_HEADING) not in normalize(summary_text):
+                continue
+            rest = normalized_md[summary_match.end():]
+            end_match = re.search(r"</details\s*>", rest, flags=re.IGNORECASE)
+            content_html = rest[: end_match.start()] if end_match else rest
+            content_md = _html_to_markdownish(content_html)
+            if not content_md:
+                content_md = html.unescape(re.sub(r"<[^>]+>", "", content_html)).strip()
+            _append(content_md)
+
+    # fallback 2: ha HTML summary sincs, próbáljuk H2 címsorral határolt blokkot kivenni
+    if not parts:
+        sections = split_markdown_sections(normalized_md)
+        for level, heading, lines in sections:
+            if level <= 0:
+                continue
+            if normalize(EXACT_VIDEO_HEADING) not in normalize(heading):
+                continue
+            _append("\n".join(lines))
+
+    # fallback 3: ha semmi sem egyezett, használjuk a 'Videó szöveg' feliratot tartalmazó sort és a következő blokkot
+    if not parts:
+        lines = normalized_md.splitlines()
+        for idx, line in enumerate(lines):
+            if normalize(EXACT_VIDEO_HEADING) not in normalize(line):
+                continue
+            block: List[str] = []
+            for ln in lines[idx + 1:]:
+                if HEADING_RE.match(ln):
+                    break
+                block.append(ln)
+            _append(_html_to_markdownish("\n".join(block)))
+            if parts:
+                break
+
+    if not parts:
+        return ""
+    return "\n\n".join(parts)
 
 def choose_section_exact(md: str) -> Tuple[str, str, str]:
     """
-    Prioritás: Videó szöveg > Lecke szöveg; egyik sincs → none.
+    Csak a 'Videó szöveg' lenyíló blokk tartalmát választja ki.
     Vissza: (selected_section, raw_text, selected_heading)
     """
-    video = _extract_section_exact_h2(md, EXACT_VIDEO_HEADING)
-    lesson = _extract_section_exact_h2(md, EXACT_LESSON_HEADING)
+    video = _extract_video_toggle(md)
     if video:
         return "video", video, EXACT_VIDEO_HEADING
-    if lesson:
-        return "lecke", lesson, EXACT_LESSON_HEADING
     return "none", "", ""
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -254,6 +492,61 @@ def renumber_ordered_lists(md: str) -> str:
         else:
             out.append(line)
     return "\n".Join(out).strip() if False else "\n".join(out).strip()  # védőhack: ne töröld a sort
+
+
+def enhance_readability(md: str) -> str:
+    """
+    Egyszerűsített formázás a jobb áttekinthetőséghez:
+    - egységes "- " jelölés a felsorolásoknál,
+    - üres sor beillesztése listák és címsorok elé,
+    - a címsorok után egy üres sort hagy, hogy elkülönüljenek.
+    """
+    if not md:
+        return ""
+
+    lines = md.splitlines()
+    out: List[str] = []
+
+    ul_re = re.compile(r"^(\s*)[-*+]\s+(.*)$")
+    ol_re = re.compile(r"^(\s*)\d+\.\s+(.*)$")
+
+    for i, line in enumerate(lines):
+        heading = HEADING_RE.match(line)
+        ul = ul_re.match(line)
+        ol = ol_re.match(line)
+
+        if heading:
+            if out and out[-1] != "":
+                out.append("")
+            out.append(line.rstrip())
+            out.append("")
+            continue
+
+        if ul:
+            indent, rest = ul.groups()
+            if out and out[-1] != "":
+                out.append("")
+            out.append(f"{indent}- {rest.strip()}")
+            continue
+
+        if ol:
+            indent, rest = ol.groups()
+            if out and out[-1] != "":
+                out.append("")
+            out.append(f"{indent}1. {rest.strip()}")
+            continue
+
+        if line.strip() == "":
+            if out and out[-1] == "":
+                continue
+            out.append("")
+        else:
+            out.append(line.rstrip())
+
+    while out and out[-1] == "":
+        out.pop()
+
+    return "\n".join(out)
 
 def strip_bold_emphasis(md: str) -> str:
     """
@@ -421,7 +714,8 @@ def extract_page_title(md: str, fallback: str) -> str:
 # Metaadat-parzolás (fejléc utáni kulcs: érték sorok)
 # ────────────────────────────────────────────────────────────────────────────────
 _META_ALIASES = {
-    "szakasz": ["szakasz", "section", "fejezet", "modul"],
+    "szakasz": ["szakasz", "section", "fejezet"],
+    "modul": ["modul"],
     "video_statusz": ["videó státusz", "video statusz", "videostatusz", "videó status", "videostatus", "státusz", "statusz", "státus", "status"],
     "lecke_hossza": ["lecke hossza", "lesson length", "hossz"],
     "utolso_modositas": ["utolsó módosítás", "utolso modositas", "last modified", "utolsó módosítás dátuma"],
@@ -602,16 +896,16 @@ def convert_zip_to_datasets(
         meta = parse_metadata_block(text)
         sorsz_int = meta_sorszam_as_int(meta)
 
-        # PONTOS H2 egyezés (csak a két fix cím engedélyezett)
-        video_txt  = _extract_section_exact_h2(text, EXACT_VIDEO_HEADING)
-        lesson_txt = _extract_section_exact_h2(text, EXACT_LESSON_HEADING)
+        # Lenyíló (toggle) Videó szöveg blokk kinyerése
+        video_txt = _extract_video_toggle(text)
 
-        # Kiválasztás prioritással
+        # Kiválasztás: csak a lenyíló Videó szöveg tartalma számít
         selected, raw, selected_heading = choose_section_exact(text)
 
         # tisztítás
         raw_clean = strip_bold_emphasis(raw)
         raw_clean = clean_markdown(raw_clean)
+        raw_clean = enhance_readability(raw_clean)
         raw_clean = renumber_ordered_lists(raw_clean)
 
         # táblázatok kivonata csak a kiválasztott szövegből
@@ -685,7 +979,7 @@ def convert_zip_to_datasets(
             page_id,
             title,
             len(video_txt),
-            len(lesson_txt),
+            0,
             selected,
             len(md_with_tables)
         ])
@@ -715,10 +1009,17 @@ def convert_zip_to_datasets(
             md_lines.append(f"# {title}")
         if meta_lines:
             md_lines.append("\n".join(meta_lines))  # meta blokk
+        section_body = md_with_tables.strip()
+        if selected_heading and section_body:
+            section_lines = section_body.splitlines()
+            if section_lines and section_lines[0].strip() == f"## {selected_heading}".strip():
+                section_body = "\n".join(section_lines[1:]).lstrip("\n")
+
         if selected_heading:
             md_lines.append(f"## {selected_heading}")
-        if md_with_tables.strip():
-            md_lines.append(md_with_tables)
+
+        if section_body:
+            md_lines.append(section_body)
         else:
             md_lines.append("Ehhez a leckéhez nem készült leírás.")
         clean_md_text = "\n\n".join([ln for ln in md_lines if ln]).strip()
@@ -748,9 +1049,9 @@ def convert_zip_to_datasets(
 with st.expander("Mi ez?"):
     st.markdown(
         "- Tölts fel egy **Notion export ZIP**-et (Markdown & CSV exportból a ZIP-et használd).\n"
-        "- A konverter **PONTOS egyezéssel** csak a `## Videó szöveg` vagy, ha az üres/hiányzik, a `## Lecke szöveg` szakaszt veszi ki.\n"
-        "- Ha egyik sincs, a kimenet: _Ehhez a leckéhez nem készült leírás._\n"
-        "- A félkövér (**…**) jelölést eltávolítja (kódblokkok érintetlenek).\n"
+        "- A konverter az összes `Videó szöveg` lenyíló (toggle) blokk teljes tartalmát veszi ki.\n"
+        "- Ha nincs ilyen lenyíló blokk, a kimenet: _Ehhez a leckéhez nem készült leírás._\n"
+        "- A félkövér (**…**) jelölést eltávolítja (kódblokkok érintetlenek), a címsorokat és listákat jobban tagolja az olvashatóságért.\n"
         "- A táblázatokat (GFM) felismeri és **JSON kivonatot** készít róluk.\n"
         "- **Metaadatok megőrzése**: a *Szakasz, Videó státusz, Lecke hossza, Utolsó módosítás, Típus, Kurzus, Vimeo link* sorok a H1 után bekerülnek a tisztított MD-be.\n"
         "- A tisztított MD fájlnév sémája: `Kurzus - Sorszám - Név.md`.\n"
